@@ -136,6 +136,8 @@ class CameraPipeline:
 
             arr = np.frombuffer(resp.content, dtype=np.uint8)
             img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None:
+                print(f"[{self.name}] HTTP snapshot decode returned None (bad JPEG)")
             return img
 
         except Exception as e:
@@ -170,6 +172,9 @@ class CameraPipeline:
                 annotated = img.copy()
 
         # Draw bounding box and label.
+        # Ensure contiguous layout — HTTP snapshot decode can produce
+        # non-standard strides that OpenCV drawing chokes on.
+        annotated = np.ascontiguousarray(annotated)
         x1, y1, x2, y2 = [int(v) for v in bbox]
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 3)
         cv2.putText(annotated, f"{etype} T{tid}",

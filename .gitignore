@@ -1,6 +1,8 @@
 # Secrets / per-machine config
 config.json
 config-*.json
+# But keep example files
+!config-*.example.json
 
 # Generated event clips
 clips/
