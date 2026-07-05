@@ -1,0 +1,16 @@
+services:
+  dogwatch:
+    build: .
+    container_name: dogwatch
+    restart: unless-stopped
+
+    # M.2 / PCIe Coral — apex driver loaded on host
+    devices:
+      - /dev/apex_0:/dev/apex_0
+
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./config-rear-east.json:/app/config-rear-east.json:ro
+      - ./models:/app/models:ro
+      - ./clips:/app/clips
+      - ./clips-rear-east:/app/clips-rear-east
