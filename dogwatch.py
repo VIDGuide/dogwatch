@@ -149,7 +149,11 @@ class CameraPipeline:
         img = self._fetch_snapshot_image() if self.snapshot_url else None
 
         if img is None:
-            # Fallback: use the ROI from the RTSP frame directly.
+            if self.snapshot_url:
+                # HTTP snapshot configured but failed — skip rather than use a
+                # potentially corrupted RTSP frame (HEVC decode glitches).
+                return
+            # No snapshot URL configured: use the RTSP frame directly.
             frame = self.grab.read()
             if frame is None:
                 return
