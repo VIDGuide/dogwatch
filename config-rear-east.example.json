@@ -1,5 +1,5 @@
 {
-  "rtsp_url": "rtsp://user:pass@nvr-ip:554/Streaming/Channels/1202",
+  "rtsp_url": "rtsp://user:pass@nvr-ip:554/Streaming/Channels/1201?rtsp_transport=tcp",
 
   "mqtt_host": "mqtt-broker-ip",
   "mqtt_port": 1883,
@@ -9,7 +9,7 @@
   "labels_path": "models/coco_labels.txt",
   "score_threshold": 0.4,
 
-  "snapshot_url": "http://user:pass@nvr-ip/ISAPI/Streaming/channels/1202/picture",
+  "snapshot_url": "http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture",
 
   "target_fps": 5,
   "clip_dir": "clips",
