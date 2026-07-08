@@ -118,43 +118,94 @@ class CameraPipeline:
             return frame[y1:y2, x1:x2]
         return frame
 
+    @staticmethod
+    def _is_image_bad(img):
+        """Check if a decoded image is a grey/static/corrupted frame.
+
+        Hikvision NVRs sometimes return a JPEG from the /picture endpoint
+        mid-GOP, before the decoder has an I-frame reference. The result
+        is a grey-tinted frame (mean ~128, very low variance) that looks
+        like decoder noise with faint dog fragments.
+        """
+        if img is None:
+            return True
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        mean, stddev = cv2.meanStdDev(gray)
+        mean_v, std_v = mean[0][0], stddev[0][0]
+        # Grey/static decode glitch: pixel values cluster around mid-grey
+        # with very little variation across the frame.
+        if 105 < mean_v < 150 and std_v < 40:
+            return True
+        # Pure black/white frames are also suspect.
+        if std_v < 8:
+            return True
+        return False
+
     def _fetch_snapshot_image(self):
-        """Fetch a clean JPEG from the NVR HTTP snapshot API."""
+        """Fetch a clean JPEG from the NVR HTTP snapshot API, retrying on bad quality.
+
+        The Hikvision ISAPI /picture endpoint can return a partially-decoded
+        grey frame if it snaps mid-GOP. We retry up to 3 times with a 500ms
+        delay between attempts, validating each result for image quality.
+        """
         url = self.snapshot_url
         if not url:
             return None
 
-        try:
-            # Parse credentials from URL for Digest auth.
-            parsed = requests.utils.urlparse(url)
-            user, pw = parsed.username, parsed.password
-            clean_url = url.replace(f"{user}:{pw}@", "") if user else url
+        for attempt in range(3):
+            try:
+                # Parse credentials from URL for Digest auth.
+                parsed = requests.utils.urlparse(url)
+                user, pw = parsed.username, parsed.password
+                clean_url = url.replace(f"{user}:{pw}@", "") if user else url
 
-            resp = requests.get(clean_url, auth=HTTPDigestAuth(user, pw),
-                                timeout=5)
-            resp.raise_for_status()
+                resp = requests.get(clean_url, auth=HTTPDigestAuth(user, pw),
+                                    timeout=5)
+                resp.raise_for_status()
 
-            arr = np.frombuffer(resp.content, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if img is None:
-                print(f"[{self.name}] HTTP snapshot decode returned None (bad JPEG)")
-            return img
+                arr = np.frombuffer(resp.content, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
-        except Exception as e:
-            print(f"[{self.name}] HTTP snapshot fetch failed: {e}")
-            return None
+                if img is not None and not self._is_image_bad(img):
+                    return img
 
-    def _publish_snapshot_thread(self, etype, tid, bbox):
+                if img is None:
+                    print(f"[{self.name}] HTTP snapshot decode returned None (bad JPEG, attempt {attempt + 1})")
+                else:
+                    print(f"[{self.name}] HTTP snapshot returned grey/static frame (attempt {attempt + 1}) \u2014 retrying")
+
+            except Exception as e:
+                print(f"[{self.name}] HTTP snapshot fetch failed (attempt {attempt + 1}): {e}")
+
+            if attempt < 2:
+                time.sleep(0.5)  # wait for next GOP I-frame before retrying
+
+        print(f"[{self.name}] HTTP snapshot gave bad image after 3 attempts")
+        return None
+
+    def _publish_snapshot_thread(self, etype, tid, bbox, capture_ts=None):
         """Fetch snapshot, annotate, and publish (runs in background thread)."""
         img = self._fetch_snapshot_image() if self.snapshot_url else None
 
         if img is None:
             if self.snapshot_url:
-                # HTTP snapshot configured but failed — skip rather than use a
-                # potentially corrupted RTSP frame (HEVC decode glitches).
-                return
-            # No snapshot URL configured: use the RTSP frame directly.
-            frame = self.grab.read()
+                # HTTP snapshot returned bad quality after 3 retries.
+                # Wait for a clean frame from RTSP — the HEVC decoder
+                # may take a few frames to sync (a 1080p/HEVC stream
+                # typically recovers within 1-2 GOPs, ~1-2s). Poll the
+                # FrameGrabber (which keeps the latest frame) and skip
+                # decode-glitched grey frames.
+                good_frame = None
+                for _ in range(30):  # ~3s at 100ms per poll
+                    f = self.grab.read()
+                    if f is not None and not self._is_image_bad(f):
+                        good_frame = f
+                        break
+                    time.sleep(0.1)
+                frame = good_frame
+            else:
+                # No snapshot URL configured: use the RTSP frame directly.
+                frame = self.grab.read()
             if frame is None:
                 return
             roi = self._apply_crop(frame)
@@ -188,7 +239,7 @@ class CameraPipeline:
         ok, buf = cv2.imencode(".jpg", annotated,
                                [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         if ok and self.pub:
-            self.pub.snapshot(buf.tobytes())
+            self.pub.snapshot(buf.tobytes(), capture_ts=capture_ts)
 
     def tick(self, detector, t0):
         """Process one frame through the shared detector."""
@@ -230,7 +281,7 @@ class CameraPipeline:
                 snapshot_sent = True
                 threading.Thread(
                     target=self._publish_snapshot_thread,
-                    args=(etype, tid, bbox),
+                    args=(etype, tid, bbox, t0),
                     daemon=True,
                 ).start()
 

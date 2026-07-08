@@ -8,6 +8,12 @@ services:
     devices:
       - /dev/apex_0:/dev/apex_0
 
+    environment:
+      # Force OpenCV + FFmpeg to use TCP transport for RTSP —
+      # the `?rtsp_transport=tcp` URL param doesn't reliably work
+      # with OpenCV's VideoCapture FFmpeg backend.
+      OPENCV_FFMPEG_CAPTURE_OPTIONS: "rtsp_transport;tcp"
+
     volumes:
       - ./config.json:/app/config.json:ro
       - ./config-rear-east.json:/app/config-rear-east.json:ro
