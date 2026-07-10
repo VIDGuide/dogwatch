@@ -78,10 +78,22 @@ class CameraPipeline:
         # Hikvision format: http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture
         self.snapshot_url = cfg.get("snapshot_url")
 
-        # Wait for the first frame so we know the resolution.
+        # Wait for the first frame so we know the resolution. Bounded so a
+        # dead/unreachable camera fails loudly (non-zero exit) instead of
+        # hanging the container forever with no signal for the orchestrator
+        # to act on.
         frame = None
+        deadline = time.time() + cfg.get("startup_timeout_seconds", 60)
         while frame is None:
             frame = self.grab.read()
+            if frame is not None:
+                break
+            if time.time() > deadline:
+                raise RuntimeError(
+                    f"[{name}] No frame received from {cfg['rtsp_url']} after "
+                    f"{cfg.get('startup_timeout_seconds', 60)}s — check the RTSP "
+                    f"URL/credentials and that the camera is reachable"
+                )
             time.sleep(0.2)
         full_h, full_w = frame.shape[:2]
 
@@ -114,6 +126,9 @@ class CameraPipeline:
                 os.environ.get("MQTT_TOPIC", cfg["mqtt_base_topic"]),
                 camera_name=name,
                 off_delay=cfg.get("off_delay_seconds", 180),
+                username=os.environ.get("MQTT_USERNAME", cfg.get("mqtt_username")),
+                password=os.environ.get("MQTT_PASSWORD", cfg.get("mqtt_password")),
+                use_tls=cfg.get("mqtt_tls", False),
             )
         except Exception as e:
             print(f"[{name}] MQTT connection failed: {e} — running without publishing")

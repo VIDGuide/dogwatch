@@ -45,7 +45,13 @@ def _load_config() -> dict:
 
 
 _CONFIG = _load_config()
-TELEGRAM_CHAT_ID = str(_CONFIG.get("chat_id", os.environ.get("TELEGRAM_CHAT_ID", "")))
+TELEGRAM_CHAT_ID = str(_CONFIG.get("chat_id", os.environ.get("TELEGRAM_CHAT_ID", ""))).strip()
+if not TELEGRAM_CHAT_ID:
+    raise RuntimeError(
+        "No Telegram chat_id configured \u2014 set 'chat_id' in "
+        f"{_CONFIG_PATH} or the TELEGRAM_CHAT_ID env var. Without it, "
+        "Telegram sends will silently fail (empty chat_id) once an event fires."
+    )
 
 
 # ---- MQTT topic helpers ----
@@ -235,6 +241,16 @@ def _read_mqtt_retained(client, topic: str, timeout: float = 1.0) -> str | None:
 
     Returns the payload as a str, or *None* if there is no retained
     message or the read times out.
+
+    This is called from inside ``on_message`` on the same thread that
+    services the MQTT network loop (``loop_forever()`` in ``main()``), so
+    unlike ``mqtt_publisher.Publisher._read_retained`` (which is called from
+    a *different* thread than the one running ``loop_start()``), we can't
+    wait on an event set by a callback \u2014 that callback would never fire
+    because this thread would be blocked waiting on itself. Manually pumping
+    ``client.loop()`` here is the correct, reentrant way to service the
+    socket for this one-shot request/response while already inside a
+    callback on the same thread.
     """
     result = [None]
 
@@ -514,8 +530,8 @@ def capture_snapshot(camera_name: str) -> str:
 _last_on_ts: dict = {}  # debounce per camera — keyed by camera name
 
 
-def on_connect(client, userdata, flags, rc):
-    print(f"Connected to MQTT ({MQTT_HOST}:{MQTT_PORT}) rc={rc}")
+def on_connect(client, userdata, flags, reason_code, properties=None):
+    print(f"Connected to MQTT ({MQTT_HOST}:{MQTT_PORT}) reason_code={reason_code}")
     client.subscribe(f"{BASE_TOPIC}/#", qos=0)
 
 
@@ -614,7 +630,7 @@ def on_message(client, userdata, msg):
 
 
 def main():
-    client = mqtt.Client()
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.on_connect = on_connect
     client.on_message = on_message
     client.connect(MQTT_HOST, MQTT_PORT, 60)

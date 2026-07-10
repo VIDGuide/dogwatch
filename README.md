@@ -61,6 +61,15 @@ Each camera needs its own `config-<name>.json`. See `config.example.json` and
 | `event_cooldown_seconds` | Min seconds between repeated events |
 | `off_delay_seconds` | HA `off_delay` for the binary sensors — auto-reverts to OFF this long after the last ON, even if our OFF message is lost (fixes sensors sticking triggered). Default 180 |
 | `min_consecutive` | Consecutive detections required before firing events |
+| `startup_timeout_seconds` | Max seconds to wait for the first camera frame before failing loudly (non-zero exit) instead of hanging forever. Default 60 |
+| `mqtt_username` / `mqtt_password` | (Optional) MQTT broker credentials. Can also be set via the `MQTT_USERNAME` / `MQTT_PASSWORD` env vars |
+| `mqtt_tls` | (Optional) Enable TLS for the MQTT connection. Default `false` |
+
+**MQTT security note:** by default the broker connection is plaintext and
+unauthenticated, which is fine for a broker that never leaves
+localhost/a trusted LAN. If your broker is reachable beyond that (a
+different host, a VPN, etc.), set `mqtt_username`/`mqtt_password` and
+`mqtt_tls: true`.
 
 Set `DOGWATCH_DEBUG=1` in the container environment to log the per-frame
 digging sub-signals (`stationary`, `motion` fraction, held time) so the digging
@@ -74,7 +83,7 @@ The Coral detector only publishes MQTT. The alerting/verification layer lives in
 | File | Runs as | Role |
 |------|---------|------|
 | `dogwatch-notify.py` | systemd user service (`dogwatch-notify.service`) | Subscribes to MQTT, republishes annotated snapshots to HA, keeps a periodic live still (60s), writes an event log |
-| `dogwatch-check.sh` | cron `*/5 * * * *` | Reads the event log, sends a Telegram ping, runs **Gemini** vision verification (dog presence **and** digging), sends confirm/false-alarm follow-ups |
+| `dogwatch-check.sh` | cron `*/5 * * * *` | Reads the event log, sends a Telegram ping, runs vision model verification (dog presence **and** digging), sends confirm/false-alarm follow-ups |
 | `dogwatch-notify.config.example.json` | — | Template for the camera registry + Telegram chat id used by the notifier |
 
 See **[`pipeline/home-assistant-example.md`](pipeline/home-assistant-example.md)**
@@ -84,10 +93,62 @@ tiles + camera snapshots) taken from a working dashboard.
 
 **Secrets:** the notifier reads its camera URLs and chat id from
 `pipeline/dogwatch-notify.config.json` (gitignored — copy the `.example`).
-The Gemini/Telegram tokens are read at runtime from `~/.openclaw/secrets.json`.
-No credentials are committed. `dogwatch-check.sh` still uses absolute
-`$HOME/.openclaw` paths for its workspace snapshot dir — adjust if you deploy
-elsewhere.
+The Telegram bot token and vision API key are read at runtime from
+`~/.openclaw/secrets.json`. No credentials are committed. Since this file
+holds live API tokens, lock it down to your user only:
+```bash
+chmod 600 ~/.openclaw/secrets.json
+```
+`dogwatch-check.sh` uses `${DOGWATCH_WORKSPACE_DIR:-$HOME/.openclaw/workspace/dogwatch_snaps}`
+for its workspace snapshot dir (override with `DOGWATCH_WORKSPACE_DIR` if you
+deploy elsewhere), and relies on GNU `date` (`date -d`), so it targets
+Linux cron/systemd hosts — it will not run as-is on macOS/BSD.
+
+The pipeline scripts (`dogwatch-notify.py`, `dogwatch-check.sh`) run outside
+the Docker image, directly on the host under a plain Python 3.9 venv. Install
+their dependencies with:
+```bash
+pip install -r pipeline/requirements.txt
+```
+
+### Vision model (model-agnostic)
+
+`dogwatch-check.sh` calls the vision model through the [OpenAI-compatible
+chat completions format](https://ai.google.dev/gemini-api/docs/openai), so
+any provider that speaks this API can be used instead of Gemini — swap in
+OpenAI, a local Ollama/vLLM server, or another hosted provider without
+touching the code. Configure it with env vars (e.g. in the cron
+environment or a wrapper script):
+
+| Env var | Default | Description |
+|---------|---------|--------------|
+| `DOGWATCH_VISION_API_URL` | Gemini's OpenAI-compatible endpoint | Chat completions endpoint URL |
+| `DOGWATCH_VISION_MODEL` | `gemini-3-flash-preview` | Model name to request |
+| `DOGWATCH_VISION_API_KEY` | (falls back to `secrets.json`) | API key, sent as a `Bearer` token |
+
+Gemini is the default because its free tier is generous for this usage
+pattern (a handful of image calls every few minutes), but the pin is a
+convenience default, not a hard dependency. If `DOGWATCH_VISION_API_KEY` is
+unset, the script falls back to `models.providers.google.apiKey` in
+`~/.openclaw/secrets.json` for backwards compatibility with existing
+Gemini-only setups.
+
+## Known limitations
+
+- **Python 3.9 pin (structural, not easily fixable).** The whole detection
+  container is pinned to Python 3.9 because `pycoral`/`tflite_runtime` are
+  abandoned upstream and only ever shipped `cp39` wheels. Python 3.9 reached
+  end-of-life on 2025-10-31, so this image runs on an unsupported CPython
+  version by necessity, not choice. All dependency versions in the
+  `Dockerfile` and `pipeline/requirements.txt` are bumped to the newest
+  release that still ships a `cp39` wheel, and are re-checked whenever a CVE
+  or dependency bump is made — but the underlying Python version itself can't
+  be moved forward without replacing the Coral inference stack (e.g. ONNX
+  Runtime + a different TPU/accelerator path).
+- **Pillow capped at 11.3.0** for the same reason (last `cp39` release;
+  12.x dropped Python 3.9). Known CVEs fixed in 12.1/12.2 are all in
+  PSD/PDF/DDS/FITS parsing; `dogwatch-notify.py` only opens JPEGs it captures
+  itself, so exposure is low but not zero if that assumption ever changes.
 
 ### Snapshot quality / grey-frame handling
 

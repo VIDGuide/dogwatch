@@ -1,12 +1,17 @@
 #!/bin/bash
 # DogWatch event checker — fully event-driven
 # Checks for recent dog events, sends quick Telegram ping,
-# runs Gemini vision verification via OpenRouter on each snapshot,
-# and sends confirmation/false-alarm follow-up.
+# runs vision model verification (via any OpenAI-compatible chat completions
+# API — defaults to Google Gemini, which has a generous free tier for this
+# usage pattern, but any compatible provider/model can be swapped in via
+# env vars) on each snapshot, and sends a confirmation / false-alarm
+# follow-up.
 # Silent exit on no events — no model call, no noise.
 STATUS_FILE="/tmp/dogwatch-events.jsonl"
+# GNU date syntax (-d) — this script targets Linux cron/systemd hosts and
+# will not run as-is on macOS/BSD (which needs `date -v-4M +%s` instead).
 CUTOFF=$(date +%s -d "4 minutes ago")
-WORKSPACE_SNAP_DIR="/home/misaunders/.openclaw/workspace/dogwatch_snaps"
+WORKSPACE_SNAP_DIR="${DOGWATCH_WORKSPACE_DIR:-$HOME/.openclaw/workspace/dogwatch_snaps}"
 MARKER_FILE="/tmp/dogwatch-pending.jsonl"
 SECRETS_FILE="$HOME/.openclaw/secrets.json"
 # Chat id is loaded from (in order): DOGWATCH_CHAT_ID env, the notify config
@@ -16,6 +21,18 @@ CHAT_ID="${DOGWATCH_CHAT_ID:-}"
 if [ -z "$CHAT_ID" ] && [ -f "$NOTIFY_CONFIG" ]; then
   CHAT_ID=$(python3 -c "import json,sys; print(json.load(open('$NOTIFY_CONFIG')).get('chat_id',''))" 2>/dev/null)
 fi
+
+# Vision model config — all overridable so any OpenAI-compatible vision
+# endpoint can be used instead of Gemini. Defaults point at Gemini's
+# OpenAI-compatible endpoint (https://ai.google.dev/gemini-api/docs/openai).
+#   DOGWATCH_VISION_API_URL   — chat completions endpoint (default: Gemini)
+#   DOGWATCH_VISION_MODEL     — model name (default: gemini-3-flash-preview)
+#   DOGWATCH_VISION_API_KEY   — API key. Falls back to the "google" provider
+#                               key in secrets.json if unset, for backwards
+#                               compatibility with existing Gemini setups.
+VISION_API_URL="${DOGWATCH_VISION_API_URL:-https://generativelanguage.googleapis.com/v1beta/openai/chat/completions}"
+VISION_MODEL="${DOGWATCH_VISION_MODEL:-gemini-3-flash-preview}"
+VISION_API_KEY="${DOGWATCH_VISION_API_KEY:-}"
 
 mkdir -p "$WORKSPACE_SNAP_DIR"
 rm -f "$MARKER_FILE"
@@ -31,6 +48,9 @@ export DW_MARKER_FILE="$MARKER_FILE"
 export DW_SECRETS_FILE="$SECRETS_FILE"
 export DW_CHAT_ID="$CHAT_ID"
 export DW_STATUS_FILE="$STATUS_FILE"
+export DW_VISION_API_URL="$VISION_API_URL"
+export DW_VISION_MODEL="$VISION_MODEL"
+export DW_VISION_API_KEY="$VISION_API_KEY"
 
 python3 << 'PYEOF'
 import json, time, sys, shutil, os, urllib.request, urllib.parse, base64
@@ -41,19 +61,38 @@ MARKER_FILE = os.environ['DW_MARKER_FILE']
 SECRETS_FILE = os.path.expanduser(os.environ['DW_SECRETS_FILE'])
 CHAT_ID = os.environ['DW_CHAT_ID']
 STATUS_FILE = os.environ['DW_STATUS_FILE']
+VISION_API_URL = os.environ['DW_VISION_API_URL']
+VISION_MODEL = os.environ['DW_VISION_MODEL']
+VISION_API_KEY = os.environ.get('DW_VISION_API_KEY', '')
 
 # ---- Load secrets ----
 try:
     with open(SECRETS_FILE) as f:
         secrets = json.load(f)
     bot_token = secrets['channels']['telegram']['accounts']['default']['botToken']
-    google_api_key = secrets['models']['providers']['google']['apiKey']
 except (KeyError, FileNotFoundError) as e:
     print(f'ERROR: cannot load secrets: {e}', file=sys.stderr)
     sys.exit(1)
 
+# Vision API key: prefer the explicit DOGWATCH_VISION_API_KEY env var (works
+# for any provider). Falls back to secrets.json's "google" provider key for
+# backwards compatibility with existing Gemini-only setups that never set
+# the new env var.
+if not VISION_API_KEY:
+    try:
+        VISION_API_KEY = secrets['models']['providers']['google']['apiKey']
+    except KeyError:
+        pass
+
+if not VISION_API_KEY:
+    print(
+        'ERROR: no vision API key configured — set DOGWATCH_VISION_API_KEY '
+        'or add secrets.json models.providers.google.apiKey',
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 TG_URL = f'https://api.telegram.org/bot{bot_token}/sendMessage'
-GEMINI_URL = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={google_api_key}'
 
 # ---- Helpers ----
 def tg_send(text, parse_mode='Markdown'):
@@ -95,7 +134,14 @@ def tg_send_photo(photo_path, caption):
         return False
 
 def vision_verify(image_path):
-    """Call Google Gemini to assess (a) dog presence and (b) whether it is digging.
+    """Call a vision model to assess (a) dog presence and (b) whether it is digging.
+
+    Uses the OpenAI-compatible chat completions format (model-agnostic — see
+    VISION_API_URL/VISION_MODEL/VISION_API_KEY above), so any provider that
+    speaks this API (Gemini, OpenAI, a local vLLM/Ollama server, etc.) can be
+    swapped in without code changes. Defaults to Google Gemini's
+    OpenAI-compatible endpoint (https://ai.google.dev/gemini-api/docs/openai),
+    which has a generous free tier for this usage pattern.
 
     Returns a dict {'dog': 'DOG'|'NO_DOG'|'UNCERTAIN', 'digging': bool|None}
     or None on error."""
@@ -106,54 +152,58 @@ def vision_verify(image_path):
         print(f'  vision_verify: cannot read {image_path}: {e}', file=sys.stderr)
         return None
 
+    prompt_text = (
+        'You are analysing a backyard security snapshot to detect a dog '
+        'near/under a fence and whether it is digging.\n'
+        'Consider motion blur, lighting, and common false positives '
+        '(leaves, shadows, wind, cars, people).\n'
+        'Digging cues: head/nose lowered to the ground, front paws at '
+        'the soil, a paw/scratching motion, or freshly disturbed dirt '
+        'directly under the dog.\n'
+        'Respond with STRICT JSON only, no prose, in exactly this form:\n'
+        '{"dog": "DOG"|"NO_DOG"|"UNCERTAIN", "digging": "YES"|"NO"|"UNCERTAIN"}\n'
+        'dog = DOG if a dog is clearly or very likely present, NO_DOG if '
+        'definitely not, UNCERTAIN if you cannot tell. '
+        'digging = YES only if the dog appears to be digging, NO if a dog '
+        'is present but not digging, UNCERTAIN otherwise.'
+    )
+
     payload = {
-        'contents': [{
-            'parts': [
+        'model': VISION_MODEL,
+        'messages': [{
+            'role': 'user',
+            'content': [
+                {'type': 'text', 'text': prompt_text},
                 {
-                    'text': (
-                        'You are analysing a backyard security snapshot to detect a dog '
-                        'near/under a fence and whether it is digging.\n'
-                        'Consider motion blur, lighting, and common false positives '
-                        '(leaves, shadows, wind, cars, people).\n'
-                        'Digging cues: head/nose lowered to the ground, front paws at '
-                        'the soil, a paw/scratching motion, or freshly disturbed dirt '
-                        'directly under the dog.\n'
-                        'Respond with STRICT JSON only, no prose, in exactly this form:\n'
-                        '{"dog": "DOG"|"NO_DOG"|"UNCERTAIN", "digging": "YES"|"NO"|"UNCERTAIN"}\n'
-                        'dog = DOG if a dog is clearly or very likely present, NO_DOG if '
-                        'definitely not, UNCERTAIN if you cannot tell. '
-                        'digging = YES only if the dog appears to be digging, NO if a dog '
-                        'is present but not digging, UNCERTAIN otherwise.'
-                    ),
-                },
-                {
-                    'inline_data': {
-                        'mime_type': 'image/jpeg',
-                        'data': b64,
-                    },
+                    'type': 'image_url',
+                    'image_url': {'url': f'data:image/jpeg;base64,{b64}'},
                 },
             ],
         }],
-        'generationConfig': {
-            'maxOutputTokens': 40,
-            'responseMimeType': 'application/json',
-        },
+        'max_tokens': 40,
+        'response_format': {'type': 'json_object'},
     }
 
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(GEMINI_URL, data=data, method='POST')
+    req = urllib.request.Request(VISION_API_URL, data=data, method='POST')
     req.add_header('Content-Type', 'application/json')
+    req.add_header('Authorization', f'Bearer {VISION_API_KEY}')
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read())
-        texts = []
-        for c in result.get('candidates', []):
-            content = c.get('content', {})
-            for p in content.get('parts', []):
-                t = p.get('text', '')
-                if t:
-                    texts.append(t)
-        combined = ' '.join(texts).strip()
+        combined = ''
+        for choice in result.get('choices', []):
+            msg = choice.get('message', {})
+            content = msg.get('content', '')
+            if isinstance(content, str):
+                combined += content
+            elif isinstance(content, list):
+                # Some OpenAI-compatible providers return content as a list
+                # of typed parts rather than a plain string.
+                for part in content:
+                    if isinstance(part, dict) and part.get('type') == 'text':
+                        combined += part.get('text', '')
+        combined = combined.strip()
 
         dog = 'UNCERTAIN'
         digging = None

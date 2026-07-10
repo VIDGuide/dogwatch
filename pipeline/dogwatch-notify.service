@@ -7,7 +7,9 @@ Wants=network-online.target
 Environment=MQTT_HOST=127.0.0.1
 Environment=MQTT_PORT=1883
 Environment=MQTT_TOPIC=dogwatch
-ExecStart=/home/misaunders/.openclaw/workspace/scripts/dogwatch-venv/bin/python /home/misaunders/.openclaw/workspace/scripts/dogwatch-notify.py
+# %h expands to the home directory of the user running this (user) unit —
+# adjust the venv/script path below to match your install location.
+ExecStart=%h/.openclaw/workspace/scripts/dogwatch-venv/bin/python %h/.openclaw/workspace/scripts/dogwatch-notify.py
 Restart=always
 RestartSec=5
 

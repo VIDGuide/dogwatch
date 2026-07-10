@@ -1,0 +1,12 @@
+# Pipeline scripts run on the host under a plain Python 3.9 venv (see
+# dogwatch-notify.service), independent of the Dockerfile's pycoral/tflite
+# constraint — but pinned to matching versions for consistency.
+#
+# Pillow is capped at 11.3.0: it's the last release with cp39 wheels
+# (12.x dropped Python 3.9 support). Known CVEs fixed in 12.1/12.2 are all
+# in PSD/PDF/DDS/FITS parsing — dogwatch-notify.py only ever opens JPEGs it
+# captured itself via ffmpeg/HTTP, not arbitrary untrusted files, so the
+# residual risk is low. Re-check this pin if that assumption changes.
+paho-mqtt==2.1.0
+requests==2.32.4
+Pillow==11.3.0

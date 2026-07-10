@@ -1,9 +1,14 @@
 """mqtt_publisher.py — publishes events and registers HA binary sensors.
 
-Pinned to paho-mqtt < 2 (see Dockerfile) so the simple Client() constructor
-works — consistent with the frozen-deps philosophy of the whole container.
+Uses paho-mqtt 2.x with the VERSION2 callback API (see Dockerfile pin).
 Home Assistant MQTT discovery is on by default, so two binary_sensors
 ("Dog at fence", "Dog digging") appear automatically under a Dogwatch device.
+
+Optional MQTT auth/TLS: set ``mqtt_username``/``mqtt_password`` (and/or
+``mqtt_tls: true``) in the camera config to secure the broker connection.
+By default the connection is plaintext and unauthenticated, which is fine
+for a broker that never leaves localhost/a trusted LAN but should not be
+exposed beyond that without auth+TLS.
 """
 import json
 import threading
@@ -13,18 +18,23 @@ import paho.mqtt.client as mqtt
 
 class Publisher:
     def __init__(self, host, port, base_topic, camera_name="camera", ha_discovery=True,
-                 off_delay=180):
+                 off_delay=180, username=None, password=None, use_tls=False):
         self.base = base_topic
         self.camera_name = camera_name
         self.off_delay = off_delay
         self._host = host
         self._port = port
         self._ha_discovery = ha_discovery
-        self.client = mqtt.Client()
-        # Survive broker restarts / dropped TCP.  paho-mqtt <2 can otherwise
-        # crash its network thread with "'NoneType' object has no attribute
-        # 'recv'" and never recover — which silently kills OFF publishes and
-        # leaves HA sensors stuck ON forever.
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        if username:
+            self.client.username_pw_set(username, password)
+        if use_tls:
+            self.client.tls_set()
+        # Survive broker restarts / dropped TCP.  Older paho-mqtt releases
+        # could otherwise crash their network thread with "'NoneType' object
+        # has no attribute 'recv'" and never recover — which silently kills
+        # OFF publishes and leaves HA sensors stuck ON forever. Kept even on
+        # 2.x as cheap insurance.
         self.client.reconnect_delay_set(min_delay=1, max_delay=60)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
@@ -32,16 +42,16 @@ class Publisher:
         self.client.loop_start()
         self._start_supervisor()
 
-    def _on_connect(self, client, userdata, flags, rc):
-        print(f"[{self.camera_name}] MQTT connected rc={rc}")
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        print(f"[{self.camera_name}] MQTT connected reason_code={reason_code}")
         # (Re)publish discovery on every (re)connect so HA entities survive
         # broker restarts and retained configs stay fresh.
         if self._ha_discovery:
             self._publish_discovery()
 
-    def _on_disconnect(self, client, userdata, rc):
-        if rc != 0:
-            print(f"[{self.camera_name}] MQTT disconnected rc={rc} \u2014 auto-reconnecting")
+    def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code != 0:
+            print(f"[{self.camera_name}] MQTT disconnected reason_code={reason_code} \u2014 auto-reconnecting")
 
     def _start_supervisor(self):
         """Watchdog thread: force a reconnect if the network loop ever wedges.
@@ -146,18 +156,25 @@ class Publisher:
 
         Returns the payload as a str, or *None* if there is no retained
         message or the read times out.
+
+        The client's network loop is already running in a background thread
+        (``loop_start()`` in ``__init__``), so this just waits on an event set
+        by the message callback rather than pumping ``client.loop()`` itself —
+        calling ``loop()`` manually alongside a running ``loop_start()`` thread
+        means two threads racing to read the same socket, which can silently
+        drop or duplicate messages.
         """
         result = [None]
+        received = threading.Event()
 
         def _cb(_client, _userdata, msg):
             result[0] = msg.payload.decode()
+            received.set()
 
         self.client.message_callback_add(topic, _cb)
         self.client.subscribe(topic, qos=0)
 
-        deadline = time.time() + timeout
-        while result[0] is None and time.time() < deadline:
-            self.client.loop(timeout=0.05)
+        received.wait(timeout)
 
         self.client.unsubscribe(topic)
         self.client.message_callback_remove(topic)
