@@ -32,11 +32,21 @@ Assistant via MQTT.
    ```
 
 2. **Download the model**
+
+   Both files come from Google's official [`google-coral/test_data`](https://github.com/google-coral/test_data)
+   repo:
    ```bash
    mkdir -p models
-   # ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite
-   # coco_labels.txt
+   curl -L -o models/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite \
+     https://raw.githubusercontent.com/google-coral/test_data/master/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite
+   curl -L -o models/coco_labels.txt \
+     https://raw.githubusercontent.com/google-coral/test_data/master/coco_labels.txt
    ```
+   This is the stock COCO-trained SSD MobileNet V2 model, already compiled
+   for the Edge TPU — no training or conversion needed. It detects all 90
+   COCO classes; `detector.py` filters to just `dog` at runtime by looking
+   up the label id in `coco_labels.txt`, so nothing else needs to change if
+   you swap in a different (still Edge-TPU-compiled) SSD model later.
 
 3. **Run**
    ```bash
@@ -133,9 +143,27 @@ unset, the script falls back to `models.providers.google.apiKey` in
 `~/.openclaw/secrets.json` for backwards compatibility with existing
 Gemini-only setups.
 
+## Development
+
+Unit tests cover `tracker.py`, `behavior.py`, and `snapshot_quality.py` (the
+parts with real logic, as opposed to I/O glue). They run on plain Python —
+no Coral hardware or camera feed needed.
+
+```bash
+pip install -r requirements-test.txt
+pytest tests/ -v
+```
+
+CI (`.github/workflows/ci.yml`) runs on every push/PR to `main`: unit tests,
+a `py_compile` syntax check across all modules, a `bash -n` check on the
+`pipeline/*.sh` scripts, and a full `linux/amd64` Docker image build (no
+Coral hardware available in CI, so this only verifies the image builds and
+installs cleanly — not that inference actually works).
+
 ## Known limitations
 
-- **Python 3.9 pin (structural, not easily fixable).** The whole detection
+- **Python 3.9 pin (structural, not easily fixable — tracked in
+  [#1](https://github.com/VIDGuide/dogwatch/issues/1)).** The whole detection
   container is pinned to Python 3.9 because `pycoral`/`tflite_runtime` are
   abandoned upstream and only ever shipped `cp39` wheels. Python 3.9 reached
   end-of-life on 2025-10-31, so this image runs on an unsupported CPython

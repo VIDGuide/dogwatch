@@ -1,0 +1,9 @@
+# Test-only dependencies for tracker.py / behavior.py unit tests.
+# Runtime deps (numpy/opencv/shapely) are pinned in the Dockerfile — see the
+# comment there for why they're capped below their latest versions
+# (pycoral's numpy 1.x ABI + CVE-2025-53644 avoidance). Mirrored here so CI
+# exercises the same versions that actually ship in the image.
+pytest==8.4.2
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+shapely==2.0.6
