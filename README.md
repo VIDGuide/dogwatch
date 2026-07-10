@@ -77,6 +77,11 @@ The Coral detector only publishes MQTT. The alerting/verification layer lives in
 | `dogwatch-check.sh` | cron `*/5 * * * *` | Reads the event log, sends a Telegram ping, runs **Gemini** vision verification (dog presence **and** digging), sends confirm/false-alarm follow-ups |
 | `dogwatch-notify.config.example.json` | — | Template for the camera registry + Telegram chat id used by the notifier |
 
+See **[`pipeline/home-assistant-example.md`](pipeline/home-assistant-example.md)**
+for the Home Assistant side: the auto-discovered entities, optional snapshot-
+timestamp sensors, and the Lovelace dashboard cards (pulsing boolean status
+tiles + camera snapshots) taken from a working dashboard.
+
 **Secrets:** the notifier reads its camera URLs and chat id from
 `pipeline/dogwatch-notify.config.json` (gitignored — copy the `.example`).
 The Gemini/Telegram tokens are read at runtime from `~/.openclaw/secrets.json`.
