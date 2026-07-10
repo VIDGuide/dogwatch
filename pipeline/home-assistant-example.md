@@ -183,6 +183,193 @@ sections:
             camera_view: auto
 ```
 
+## 4. Complete copy-paste dashboard section
+
+Every `card_mod` block inline (no "as above" placeholders) — paste this whole
+thing into a view. Uses `camera.fence_dogwatch` / `camera.rear_east_dogwatch`;
+adjust to your actual entity ids (they may carry a `_2` suffix).
+
+```yaml
+type: sections
+sections:
+  - type: grid
+    cards:
+      - type: heading
+        heading: DogWatch
+      - type: grid
+        columns: 3
+        square: false
+        cards:
+          # ---------------- FENCE ----------------
+          - type: entity
+            entity: binary_sensor.dogwatch_camera_camera_dog_at_fence
+            name: "Fence: At Fence"
+            icon: mdi:shield-alert
+            card_mod:
+              style: |
+                @keyframes pulse-red {
+                  0%   { background-color: #c62828; box-shadow: 0 0 8px #c62828; }
+                  50%  { background-color: #ff1744; box-shadow: 0 0 20px #ff1744; }
+                  100% { background-color: #c62828; box-shadow: 0 0 8px #c62828; }
+                }
+                .state { font-size: 1em !important; font-weight: 600 !important; }
+                ha-state-icon { --mdc-icon-size: 22px !important; }
+                ha-card {
+                  min-height: 158px !important;
+                  display: flex !important;
+                  flex-direction: column !important;
+                  align-items: center !important;
+                  justify-content: center !important;
+                  {% if is_state(config.entity, 'on') %}
+                    animation: pulse-red 1s ease-in-out infinite !important;
+                    border: 2px solid #ff5252 !important;
+                  {% endif %}
+                }
+                ha-card .state, ha-card .card-header, ha-card .name, ha-card * {
+                  {% if is_state(config.entity, 'on') %}
+                    color: white !important;
+                  {% endif %}
+                }
+                ha-card ha-state-icon {
+                  {% if is_state(config.entity, 'on') %}
+                    --state-icon-color: #ff5252 !important;
+                    color: #ff5252 !important;
+                  {% endif %}
+                }
+          - type: entity
+            entity: binary_sensor.dogwatch_camera_camera_dog_digging
+            name: "Fence: Digging"
+            icon: mdi:shield-alert
+            card_mod:
+              style: |
+                @keyframes pulse-red {
+                  0%   { background-color: #c62828; box-shadow: 0 0 8px #c62828; }
+                  50%  { background-color: #ff1744; box-shadow: 0 0 20px #ff1744; }
+                  100% { background-color: #c62828; box-shadow: 0 0 8px #c62828; }
+                }
+                .state { font-size: 1em !important; font-weight: 600 !important; }
+                ha-state-icon { --mdc-icon-size: 22px !important; }
+                ha-card {
+                  min-height: 158px !important;
+                  display: flex !important;
+                  flex-direction: column !important;
+                  align-items: center !important;
+                  justify-content: center !important;
+                  {% if is_state(config.entity, 'on') %}
+                    animation: pulse-red 1s ease-in-out infinite !important;
+                    border: 2px solid #ff5252 !important;
+                  {% endif %}
+                }
+                ha-card .state, ha-card .card-header, ha-card .name, ha-card * {
+                  {% if is_state(config.entity, 'on') %}
+                    color: white !important;
+                  {% endif %}
+                }
+                ha-card ha-state-icon {
+                  {% if is_state(config.entity, 'on') %}
+                    --state-icon-color: #ff5252 !important;
+                    color: #ff5252 !important;
+                  {% endif %}
+                }
+          - type: picture-entity
+            entity: camera.fence_dogwatch
+            show_state: false
+            show_name: false
+            camera_view: auto
+            card_mod:
+              style: |
+                ha-card { max-height: 160px !important; min-height: 160px !important; }
+                img {
+                  max-height: 140px !important;
+                  object-fit: contain !important;
+                  background: #1a1a1a !important;
+                }
+          # ---------------- REAR-EAST ----------------
+          - type: entity
+            entity: binary_sensor.dogwatch_rear_east_rear_east_dog_at_fence
+            name: "Rear-East: At Fence"
+            icon: mdi:shield-alert
+            card_mod:
+              style: |
+                @keyframes pulse-red {
+                  0%   { background-color: #c62828; box-shadow: 0 0 8px #c62828; }
+                  50%  { background-color: #ff1744; box-shadow: 0 0 20px #ff1744; }
+                  100% { background-color: #c62828; box-shadow: 0 0 8px #c62828; }
+                }
+                .state { font-size: 1em !important; font-weight: 600 !important; }
+                ha-state-icon { --mdc-icon-size: 22px !important; }
+                ha-card {
+                  min-height: 158px !important;
+                  display: flex !important;
+                  flex-direction: column !important;
+                  align-items: center !important;
+                  justify-content: center !important;
+                  {% if is_state(config.entity, 'on') %}
+                    animation: pulse-red 1s ease-in-out infinite !important;
+                    border: 2px solid #ff5252 !important;
+                  {% endif %}
+                }
+                ha-card .state, ha-card .card-header, ha-card .name, ha-card * {
+                  {% if is_state(config.entity, 'on') %}
+                    color: white !important;
+                  {% endif %}
+                }
+                ha-card ha-state-icon {
+                  {% if is_state(config.entity, 'on') %}
+                    --state-icon-color: #ff5252 !important;
+                    color: #ff5252 !important;
+                  {% endif %}
+                }
+          - type: entity
+            entity: binary_sensor.dogwatch_rear_east_rear_east_dog_digging
+            name: "Rear-East: Digging"
+            icon: mdi:shield-alert
+            card_mod:
+              style: |
+                @keyframes pulse-red {
+                  0%   { background-color: #c62828; box-shadow: 0 0 8px #c62828; }
+                  50%  { background-color: #ff1744; box-shadow: 0 0 20px #ff1744; }
+                  100% { background-color: #c62828; box-shadow: 0 0 8px #c62828; }
+                }
+                .state { font-size: 1em !important; font-weight: 600 !important; }
+                ha-state-icon { --mdc-icon-size: 22px !important; }
+                ha-card {
+                  min-height: 158px !important;
+                  display: flex !important;
+                  flex-direction: column !important;
+                  align-items: center !important;
+                  justify-content: center !important;
+                  {% if is_state(config.entity, 'on') %}
+                    animation: pulse-red 1s ease-in-out infinite !important;
+                    border: 2px solid #ff5252 !important;
+                  {% endif %}
+                }
+                ha-card .state, ha-card .card-header, ha-card .name, ha-card * {
+                  {% if is_state(config.entity, 'on') %}
+                    color: white !important;
+                  {% endif %}
+                }
+                ha-card ha-state-icon {
+                  {% if is_state(config.entity, 'on') %}
+                    --state-icon-color: #ff5252 !important;
+                    color: #ff5252 !important;
+                  {% endif %}
+                }
+          - type: picture-entity
+            entity: camera.rear_east_dogwatch
+            show_state: false
+            show_name: false
+            camera_view: auto
+            card_mod:
+              style: |
+                ha-card { max-height: 160px !important; min-height: 160px !important; }
+                img {
+                  max-height: 140px !important;
+                  object-fit: contain !important;
+                  background: #1a1a1a !important;
+                }
+```
+
 ---
 
 ## Notes
