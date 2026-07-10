@@ -137,17 +137,25 @@ class CameraPipeline:
         mid-GOP, before the decoder has an I-frame reference. The result
         is a grey-tinted frame (mean ~128, very low variance) that looks
         like decoder noise with faint dog fragments.
+
+        Empirically measured on these cameras:
+          * genuine grey decode glitch:  mean~128, std ~1-3
+          * valid overcast/cloudy scene: mean~134, std ~37
+          * valid keyframe (normal):     mean~136, std ~55
+        The old `std < 40` gate rejected perfectly good overcast frames
+        (a common false positive that forced needless RTSP fallbacks).
+        A real glitch has almost no spatial variance, so gate on std < 12
+        — which cleanly separates the glitch (<=3) from real scenes (>=37).
         """
         if img is None:
             return True
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         mean, stddev = cv2.meanStdDev(gray)
         mean_v, std_v = mean[0][0], stddev[0][0]
-        # Grey/static decode glitch: pixel values cluster around mid-grey
-        # with very little variation across the frame.
-        if 105 < mean_v < 150 and std_v < 40:
+        # Grey/static decode glitch: mid-grey with almost no variation.
+        if 105 < mean_v < 150 and std_v < 12:
             return True
-        # Pure black/white frames are also suspect.
+        # Pure black/white / dead frames are also suspect.
         if std_v < 8:
             return True
         return False
