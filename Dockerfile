@@ -1,9 +1,19 @@
 # dogwatch — Coral Edge TPU dog detector
-# Uses Python 3.9 because pycoral wheels only support up to cp39
+#
+# Uses ai-edge-litert (LiteRT, the successor to tflite_runtime) instead of
+# pycoral/tflite_runtime. pycoral is abandoned upstream and only ever shipped
+# cp39 wheels, which pinned this whole image to Python 3.9 (EOL 2025-10-31)
+# and, downstream of that, to numpy 1.x (pycoral's compiled bindings were
+# built against the numpy 1.x C ABI). ai-edge-litert ships wheels through
+# Python 3.14 and has no numpy ceiling, which is what unblocks the numpy/
+# opencv bumps below. See README "Known limitations" and GitHub issue #1 for
+# the full history of the Python 3.9 pin this replaces.
+FROM python:3.12-slim-bookworm
 
-FROM python:3.9-slim-bookworm
-
-# libedgetpu runtime (std = standard clock speed, good thermals)
+# libedgetpu runtime (std = standard clock speed, good thermals).
+# feranick's fork is the community-maintained continuation of Google's
+# abandoned libedgetpu — this build (16.0TF2.19.1-1) is built against
+# TensorFlow 2.19.1 and lists ai-edge-litert as its recommended pairing.
 ADD https://github.com/feranick/libedgetpu/releases/download/16.0TF2.19.1-1/libedgetpu1-std_16.0tf2.19.1-1.bookworm_amd64.deb \
     /tmp/libedgetpu.deb
 
@@ -18,34 +28,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && dpkg -i /tmp/libedgetpu.deb \
     && rm /tmp/libedgetpu.deb
 
-# pycoral + tflite-runtime from Google Coral (cp39 linux x86_64)
-#
-# Dependency currency notes (see README "Known limitations" for the full
-# writeup): pycoral/tflite_runtime are abandoned upstream and only ever
-# shipped cp39 wheels, which is what pins the whole image to Python 3.9
-# (EOL 2025-10-31). Everything below this line is bumped to the latest
-# version that still supports cp39, and should be re-checked whenever the
-# Python/pycoral constraint is revisited.
-#
-# numpy is pinned to 1.26.4 (the last 1.x release) rather than bumping to
-# numpy 2.x: pycoral's compiled bindings (_pywrap_coral) are built against
-# the numpy 1.x C ABI and break under numpy 2.x at runtime (confirmed on
-# real Coral TPU hardware — pip's resolver alone won't catch this, since it
-# only checks declared version ranges, not compiled ABI compatibility).
-# This forces opencv-python-headless back to 4.9.0.80, the newest release
-# in the numpy<2 line: 4.10.0/4.11.0 carry CVE-2025-53644 (heap buffer
-# write via crafted JPEG) and 4.12.0+ requires numpy>=2, so 4.9.0.80 is the
-# newest version that is both numpy-1.x-compatible and outside the CVE's
-# affected range (4.10.0-4.11.0 only). Re-check this whole chain if the
-# pycoral/numpy-2.x ABI break is ever resolved upstream.
+# ai-edge-litert + current dependency versions (cp312 wheels, no numpy
+# ceiling). numpy/opencv/requests/paho-mqtt/shapely are all on their latest
+# stable releases as of this writing — re-check periodically, but there is
+# no known structural constraint pinning any of them anymore.
 RUN pip install --no-cache-dir \
-    "https://github.com/google-coral/pycoral/releases/download/v2.0.0/tflite_runtime-2.5.0.post1-cp39-cp39-linux_x86_64.whl" \
-    "https://github.com/google-coral/pycoral/releases/download/v2.0.0/pycoral-2.0.0-cp39-cp39-linux_x86_64.whl" \
+    ai-edge-litert==2.1.6 \
     paho-mqtt==2.1.0 \
-    numpy==1.26.4 \
-    opencv-python-headless==4.9.0.80 \
-    shapely==2.0.6 \
-    requests==2.32.4
+    numpy==2.5.1 \
+    opencv-python-headless==5.0.0.93 \
+    shapely==2.1.2 \
+    requests==2.34.2
 
 COPY *.py /app/
 WORKDIR /app

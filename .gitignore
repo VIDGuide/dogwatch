@@ -7,6 +7,9 @@ config-*.json
 # Pipeline notify config holds camera creds + chat id (keep only the example)
 pipeline/dogwatch-notify.config.json
 
+# SSH credentials + Tailscale IP for the homelab server
+.ssh
+
 # Generated event clips
 clips/
 clips-rear-east/
