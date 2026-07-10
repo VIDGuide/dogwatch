@@ -162,32 +162,29 @@ installs cleanly — not that inference actually works).
 
 ## Known limitations
 
-- **Python 3.9 pin (structural, not easily fixable — tracked in
-  [#1](https://github.com/VIDGuide/dogwatch/issues/1)).** The whole detection
-  container is pinned to Python 3.9 because `pycoral`/`tflite_runtime` are
-  abandoned upstream and only ever shipped `cp39` wheels. Python 3.9 reached
-  end-of-life on 2025-10-31, so this image runs on an unsupported CPython
-  version by necessity, not choice. All dependency versions in the
-  `Dockerfile` and `pipeline/requirements.txt` are bumped to the newest
-  release that still ships a `cp39` wheel, and are re-checked whenever a CVE
-  or dependency bump is made — but the underlying Python version itself can't
-  be moved forward without replacing the Coral inference stack (e.g. ONNX
-  Runtime + a different TPU/accelerator path).
-- **Pillow capped at 11.3.0** for the same reason (last `cp39` release;
-  12.x dropped Python 3.9). Known CVEs fixed in 12.1/12.2 are all in
-  PSD/PDF/DDS/FITS parsing; `dogwatch-notify.py` only opens JPEGs it captures
-  itself, so exposure is low but not zero if that assumption ever changes.
-- **numpy capped at 1.26.4 (the last 1.x release), opencv-python-headless
-  capped at 4.9.0.80.** pycoral's compiled bindings are built against the
-  numpy 1.x C ABI and break at runtime under numpy 2.x — confirmed on real
-  Coral TPU hardware, not just a version-range conflict pip would catch.
-  This forces opencv-python-headless back from the 4.12.x line (which
-  requires numpy>=2) to 4.9.0.80, the newest release still on numpy<2.
-  4.9.0.80 predates CVE-2025-53644 (a heap buffer write via crafted JPEG,
-  which only affects 4.10.0 and 4.11.0), so this isn't a regression to a
-  known-vulnerable version — it's a deliberate skip over the two versions
-  that were actually affected. Re-check this pin if pycoral ever ships a
-  numpy-2.x-compatible build upstream.
+- **Coral Edge TPU support is community-maintained, not official.** Google
+  has effectively abandoned the Coral software stack — `pycoral` and
+  `tflite_runtime` saw no meaningful releases in years and only ever shipped
+  `cp39` wheels (this project's Python 3.9 pin, and the numpy 1.x /
+  opencv-python-headless 4.9.x pins it forced, were resolved by migrating
+  off pycoral — see [#1](https://github.com/VIDGuide/dogwatch/issues/1) for
+  that history). The detector now uses
+  [`ai-edge-litert`](https://pypi.org/project/ai-edge-litert/) (Google's
+  actively maintained LiteRT runtime, wheels through Python 3.14) paired
+  with [`feranick/libedgetpu`](https://github.com/feranick/libedgetpu), a
+  community fork that keeps the native Edge TPU driver building against
+  current TensorFlow releases. This removed the structural numpy/opencv
+  version ceiling — the `Dockerfile` now tracks each dependency's latest
+  stable release with no known constraint forcing them behind. If
+  `feranick/libedgetpu` ever goes unmaintained too, the next fallback is
+  building `libedgetpu` from source (see their README) or moving off the
+  Coral TPU entirely.
+- `detector.py` no longer depends on `pycoral` at all — it talks to
+  `ai_edge_litert.interpreter` directly (`Interpreter` + `load_delegate`),
+  reimplementing the small, pure-Python pieces pycoral used to wrap (input
+  tensor resizing/padding, output tensor parsing for SSD-style detection
+  models). No compiled bindings are involved on the Python side anymore;
+  the only native component is `libedgetpu.so` itself.
 
 ### Snapshot quality / grey-frame handling
 

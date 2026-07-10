@@ -1,9 +1,12 @@
-# Test-only dependencies for tracker.py / behavior.py unit tests.
-# Runtime deps (numpy/opencv/shapely) are pinned in the Dockerfile — see the
-# comment there for why they're capped below their latest versions
-# (pycoral's numpy 1.x ABI + CVE-2025-53644 avoidance). Mirrored here so CI
-# exercises the same versions that actually ship in the image.
+# Test-only dependencies for tracker.py / behavior.py / snapshot_quality.py
+# unit tests. Runtime deps (numpy/opencv/shapely) are pinned in the
+# Dockerfile — mirrored here so CI exercises the same versions that
+# actually ship in the image. No structural version ceiling anymore since
+# the ai-edge-litert migration (see Dockerfile comment) — these track
+# current stable releases and should just be bumped along with the
+# Dockerfile's pins.
 pytest==8.4.2
-numpy==1.26.4
-opencv-python-headless==4.9.0.80
-shapely==2.0.6
+numpy==2.5.1
+opencv-python-headless==5.0.0.93
+shapely==2.1.2
+ai-edge-litert==2.1.6
