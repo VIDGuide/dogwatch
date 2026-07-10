@@ -405,7 +405,7 @@ def _active_tile_fraction(gray_img, tiles: int = 8, tile_std_thresh: float = 15.
 def _validate_image(path: str, min_bytes: int = 100_000) -> bool:
     """Check that the image has real content (not grey / partial-decode corruption).
 
-    Three layers, matching the detector's `_is_image_bad`:
+    Three layers, matching `snapshot_quality.is_image_bad` in the container:
       1. Size floor — flat grey JPEGs are much smaller than real frames.
       2. Global grey gate — mid-grey mean with near-zero std = decode glitch.
       3. Spatial-spread backstop — a grey field with a localized pixelated

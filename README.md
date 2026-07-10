@@ -1,5 +1,7 @@
 # DogWatch — Coral TPU Dog Detector
 
+[![CI](https://github.com/VIDGuide/dogwatch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/VIDGuide/dogwatch/actions/workflows/ci.yml)
+
 Real-time dog-at-fence and digging detection using a Google Coral Edge TPU and
 one or more RTSP cameras. Publishes events and annotated snapshots to Home
 Assistant via MQTT.
@@ -17,7 +19,10 @@ Assistant via MQTT.
 ## Requirements
 
 - Linux with a Coral Edge TPU (PCIe M.2 or USB)
-- Coral runtime: `libedgetpu1-std`
+- Coral Edge TPU runtime (`libedgetpu1-std`) — Google's official builds are
+  abandoned, so the `Dockerfile` pulls a community-maintained build from
+  [`feranick/libedgetpu`](https://github.com/feranick/libedgetpu) instead;
+  see "Known limitations" below
 - One or more RTSP cameras
 - MQTT broker (Mosquitto, Home Assistant add-on, etc.)
 
@@ -115,8 +120,9 @@ deploy elsewhere), and relies on GNU `date` (`date -d`), so it targets
 Linux cron/systemd hosts — it will not run as-is on macOS/BSD.
 
 The pipeline scripts (`dogwatch-notify.py`, `dogwatch-check.sh`) run outside
-the Docker image, directly on the host under a plain Python 3.9 venv. Install
-their dependencies with:
+the Docker image, directly on the host under a plain Python venv (any
+current Python 3 — there's no version constraint here, unlike the detector
+container). Install their dependencies with:
 ```bash
 pip install -r pipeline/requirements.txt
 ```
@@ -197,7 +203,7 @@ Assistant:
    I-frame. Grabbing "the next frame" blindly lands mid-GOP on a P/B-frame
    with no reference and renders a flat grey field (the classic "all grey" /
    "grey with a few moving pixels" snapshot).
-2. **Validation rejects bad frames** (`_is_image_bad` in the detector,
+2. **Validation rejects bad frames** (`is_image_bad` in `snapshot_quality.py`,
    `_validate_image` in the notifier), in three layers:
    - size floor (flat JPEGs are tiny),
    - global grey gate (`105 < mean < 150` and `std < 12`),
