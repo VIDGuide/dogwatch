@@ -16,7 +16,7 @@ import urllib.error
 
 import paho.mqtt.client as mqtt
 import requests
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageStat
 from requests.auth import HTTPDigestAuth
 
 STATUS_FILE = "/tmp/dogwatch-events.jsonl"
@@ -363,16 +363,69 @@ def send_telegram_text(text: str) -> bool:
 
 # ---- Snapshot ----
 
-def _validate_image(path: str, min_bytes: int = 100_000) -> bool:
-    """Quick check that the image has real content (not grey corruption).
+def _active_tile_fraction(gray_img, tiles: int = 8, tile_std_thresh: float = 15.0) -> float:
+    """Fraction of NxN tiles containing real spatial structure (PIL, no numpy).
 
-    HEVC decode glitches produce flat grey/static images that are substantially
-    smaller than real JPEGs at the same resolution.
+    Mirrors the detector's check: a valid scene has detail in almost all
+    tiles (~0.95); a flat grey glitch ~0.00; a partial decode with a
+    localized pixelated blob only ~0.06.  Catches the "grey + a bit of dog"
+    case that a whole-frame std/edge metric misses.
     """
-    size = os.path.getsize(path)
+    w, h = gray_img.size
+    tw, th = w // tiles, h // tiles
+    if tw == 0 or th == 0:
+        return 1.0  # too small to tile
+    active = 0
+    total = 0
+    for ty in range(tiles):
+        for tx in range(tiles):
+            tile = gray_img.crop((tx * tw, ty * th, (tx + 1) * tw, (ty + 1) * th))
+            if ImageStat.Stat(tile).stddev[0] >= tile_std_thresh:
+                active += 1
+            total += 1
+    return active / total if total else 1.0
+
+
+def _validate_image(path: str, min_bytes: int = 100_000) -> bool:
+    """Check that the image has real content (not grey / partial-decode corruption).
+
+    Three layers, matching the detector's `_is_image_bad`:
+      1. Size floor — flat grey JPEGs are much smaller than real frames.
+      2. Global grey gate — mid-grey mean with near-zero std = decode glitch.
+      3. Spatial-spread backstop — a grey field with a localized pixelated
+         blob (surviving "motion" region) can pass 1 & 2 but only lights up a
+         couple of tiles; real scenes light up almost all of them.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return False
     if size < min_bytes:
         print(f"  Snapshot rejected: {size} bytes < {min_bytes} min (likely corruption)")
         return False
+
+    try:
+        gray = Image.open(path).convert("L")
+    except Exception as exc:
+        print(f"  Snapshot rejected: cannot decode ({exc})")
+        return False
+
+    st = ImageStat.Stat(gray)
+    mean_v, std_v = st.mean[0], st.stddev[0]
+    # Pure dead frame.
+    if std_v < 8:
+        print(f"  Snapshot rejected: flat frame (std={std_v:.1f})")
+        return False
+    # Mid-grey decode glitch band.
+    if 105 < mean_v < 150:
+        if std_v < 12:
+            print(f"  Snapshot rejected: grey glitch (mean={mean_v:.0f} std={std_v:.1f})")
+            return False
+        frac = _active_tile_fraction(gray)
+        if frac < 0.20:
+            print(f"  Snapshot rejected: partial decode (mean={mean_v:.0f} "
+                  f"std={std_v:.1f} active_tiles={frac:.2f})")
+            return False
     return True
 
 

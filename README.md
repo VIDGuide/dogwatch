@@ -84,6 +84,27 @@ No credentials are committed. `dogwatch-check.sh` still uses absolute
 `$HOME/.openclaw` paths for its workspace snapshot dir — adjust if you deploy
 elsewhere.
 
+### Snapshot quality / grey-frame handling
+
+These cameras use inter-frame compression (the rear-east main stream is HEVC
+with a ~2 s GOP). Two mechanisms keep grey/corrupt frames out of Home
+Assistant:
+
+1. **Capture waits for a keyframe.** `capture_snapshot` uses ffmpeg
+   `-skip_frame nokey` so the first decoded frame is always a self-contained
+   I-frame. Grabbing "the next frame" blindly lands mid-GOP on a P/B-frame
+   with no reference and renders a flat grey field (the classic "all grey" /
+   "grey with a few moving pixels" snapshot).
+2. **Validation rejects bad frames** (`_is_image_bad` in the detector,
+   `_validate_image` in the notifier), in three layers:
+   - size floor (flat JPEGs are tiny),
+   - global grey gate (`105 < mean < 150` and `std < 12`),
+   - **spatial-spread backstop**: split into an 8×8 grid and reject if
+     fewer than 20% of tiles contain real detail. This catches *partial*
+     decodes — a grey field with a localized pixelated "motion" blob — that
+     can push global std past the gate yet only light up one or two tiles.
+     (Measured: pure grey ~0% active tiles, grey+blob ~6%, real scene ~95%.)
+
 ## License
 
 MIT
