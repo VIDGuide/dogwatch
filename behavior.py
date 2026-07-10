@@ -13,10 +13,14 @@ angles. If you want it as an extra signal, it's a one-line add in is_digging().
 All three thresholds below are starting guesses. Expect to tune them against your
 own footage — that's where the real accuracy comes from.
 """
+import os
 import time
 import cv2
 import numpy as np
 from shapely.geometry import Point, Polygon
+
+
+DEBUG = os.environ.get("DOGWATCH_DEBUG", "").lower() in ("1", "true", "yes")
 
 
 class BehaviorMonitor:
@@ -24,6 +28,11 @@ class BehaviorMonitor:
         pts = [(x * frame_w, y * frame_h) for x, y in cfg["fence_zone_norm"]]
         self.zone = Polygon(pts)
         self.stationary_px = cfg["stationary_px"]
+        # Digging tolerates more centroid drift than "standing still": a digging
+        # dog rocks/shuffles in place, so reusing stationary_px (tuned for a
+        # motionless dog) makes the digging gate almost impossible to satisfy.
+        # Defaults to 2x stationary_px if not set explicitly.
+        self.dig_stationary_px = cfg.get("dig_stationary_px", cfg["stationary_px"] * 2)
         self.motion_thresh = cfg["motion_energy_thresh"]
         self.dig_seconds = cfg["dig_sustain_seconds"]
         self.cooldown = cfg["event_cooldown_seconds"]
@@ -59,7 +68,7 @@ class BehaviorMonitor:
         diff = cv2.absdiff(cur, prev)
         return np.count_nonzero(diff > 25) / float(cur.size)
 
-    def is_stationary(self, track, window=2.0):
+    def is_stationary(self, track, window=2.0, max_drift=None):
         now = track.history[-1][0]
         recent = [c for (tt, c, _) in track.history if tt >= now - window]
         if len(recent) < 2:
@@ -67,7 +76,8 @@ class BehaviorMonitor:
         xs = [c[0] for c in recent]
         ys = [c[1] for c in recent]
         drift = ((max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2) ** 0.5
-        return drift <= self.stationary_px
+        limit = self.stationary_px if max_drift is None else max_drift
+        return drift <= limit
 
     def evaluate(self, tracks, gray):
         """Return [(event_type, track_id, bbox), ...] to publish."""
@@ -85,8 +95,17 @@ class BehaviorMonitor:
 
             self._maybe_emit(events, "dog_at_fence", tid, tr.bbox, now)
 
-            digging_now = (self.is_stationary(tr)
-                           and self.intra_box_motion(gray, tr.bbox) >= self.motion_thresh)
+            stationary = self.is_stationary(tr, max_drift=self.dig_stationary_px)
+            motion = self.intra_box_motion(gray, tr.bbox)
+            digging_now = stationary and motion >= self.motion_thresh
+
+            if DEBUG:
+                held = (now - tr.dig_since) if tr.dig_since else 0.0
+                print(f"[dig-debug] track {tid} in_zone stationary={stationary} "
+                      f"motion={motion:.3f} (thresh {self.motion_thresh}) "
+                      f"drift_limit={self.dig_stationary_px} "
+                      f"dig_held={held:.1f}/{self.dig_seconds}s", flush=True)
+
             if digging_now:
                 if tr.dig_since is None:
                     tr.dig_since = now

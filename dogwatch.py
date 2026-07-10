@@ -30,9 +30,13 @@ class FrameGrabber:
     latest frame and lets the main loop sample it at whatever rate it likes.
     """
 
-    def __init__(self, url, reconnect_delay=0.5):
+    def __init__(self, url, reconnect_delay=0.5, target_fps=5):
         self.url = url
         self.reconnect_delay = reconnect_delay
+        # Throttle decode to ~2x the detection fps.  Without this the grabber
+        # decodes every camera at its full native frame rate 24/7 (the main
+        # CPU hog), even though the detection loop only samples a few fps.
+        self.min_interval = 1.0 / max(1.0, target_fps * 2)
         self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         self.lock = threading.Lock()
         self.frame = None
@@ -42,6 +46,7 @@ class FrameGrabber:
 
     def _loop(self):
         while self.running:
+            t0 = time.time()
             ok, f = self.cap.read()
             if not ok:                       # stream dropped — reconnect
                 time.sleep(self.reconnect_delay)
@@ -51,6 +56,11 @@ class FrameGrabber:
             with self.lock:
                 self.frame = f
                 self.ready.set()
+            # Sleep out the remainder of the frame budget so we don't spin the
+            # CPU decoding frames the detector will never look at.
+            dt = time.time() - t0
+            if dt < self.min_interval:
+                time.sleep(self.min_interval - dt)
 
     def read(self):
         with self.lock:
@@ -62,7 +72,7 @@ class CameraPipeline:
 
     def __init__(self, cfg, name):
         self.name = name
-        self.grab = FrameGrabber(cfg["rtsp_url"])
+        self.grab = FrameGrabber(cfg["rtsp_url"], target_fps=cfg.get("target_fps", 5))
 
         # Optional HTTP snapshot URL (NVR ISAPI) for clean snapshots.
         # Hikvision format: http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture
@@ -103,6 +113,7 @@ class CameraPipeline:
                 int(os.environ.get("MQTT_PORT", cfg["mqtt_port"])),
                 os.environ.get("MQTT_TOPIC", cfg["mqtt_base_topic"]),
                 camera_name=name,
+                off_delay=cfg.get("off_delay_seconds", 180),
             )
         except Exception as e:
             print(f"[{name}] MQTT connection failed: {e} — running without publishing")
@@ -267,7 +278,7 @@ class CameraPipeline:
                 "ts": t0,
             }
             if self.pub:
-                self.pub.event(etype, payload)
+                self.pub.event(etype, payload, auto_off=120)
             stamp = time.strftime("%H:%M:%S")
             if etype == "digging":
                 fn = os.path.join(self.clip_dir, f"dig_{int(t0)}_{tid}.jpg")

@@ -12,14 +12,54 @@ import paho.mqtt.client as mqtt
 
 
 class Publisher:
-    def __init__(self, host, port, base_topic, camera_name="camera", ha_discovery=True):
+    def __init__(self, host, port, base_topic, camera_name="camera", ha_discovery=True,
+                 off_delay=180):
         self.base = base_topic
         self.camera_name = camera_name
+        self.off_delay = off_delay
+        self._host = host
+        self._port = port
+        self._ha_discovery = ha_discovery
         self.client = mqtt.Client()
+        # Survive broker restarts / dropped TCP.  paho-mqtt <2 can otherwise
+        # crash its network thread with "'NoneType' object has no attribute
+        # 'recv'" and never recover — which silently kills OFF publishes and
+        # leaves HA sensors stuck ON forever.
+        self.client.reconnect_delay_set(min_delay=1, max_delay=60)
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
         self.client.connect(host, port, 60)
         self.client.loop_start()
-        if ha_discovery:
+        self._start_supervisor()
+
+    def _on_connect(self, client, userdata, flags, rc):
+        print(f"[{self.camera_name}] MQTT connected rc={rc}")
+        # (Re)publish discovery on every (re)connect so HA entities survive
+        # broker restarts and retained configs stay fresh.
+        if self._ha_discovery:
             self._publish_discovery()
+
+    def _on_disconnect(self, client, userdata, rc):
+        if rc != 0:
+            print(f"[{self.camera_name}] MQTT disconnected rc={rc} \u2014 auto-reconnecting")
+
+    def _start_supervisor(self):
+        """Watchdog thread: force a reconnect if the network loop ever wedges.
+
+        reconnect_delay_set handles the common case, but if paho's loop thread
+        dies outright (the 'NoneType recv' bug) is_connected() stays False
+        forever.  This polls and calls reconnect() to guarantee recovery.
+        """
+        def _watch():
+            while True:
+                time.sleep(30)
+                try:
+                    if not self.client.is_connected():
+                        print(f"[{self.camera_name}] MQTT not connected \u2014 reconnecting")
+                        self.client.reconnect()
+                except Exception as e:
+                    print(f"[{self.camera_name}] MQTT reconnect attempt failed: {e}")
+        threading.Thread(target=_watch, daemon=True).start()
 
     def _publish_discovery(self):
         cam = self.camera_name
@@ -36,12 +76,20 @@ class Publisher:
                 "payload_on": "ON",
                 "payload_off": "OFF",
                 "device_class": "motion",
+                # HA-side safety net: auto-revert to OFF this many seconds after
+                # the last ON, even if our OFF message is never delivered (e.g.
+                # container restart mid-event).  This is the durable fix for
+                # sensors sticking ON permanently.
+                "off_delay": self.off_delay,
                 "unique_id": f"{dev_id}_{slug}",
                 "device": {"identifiers": [dev_id], "name": f"Dogwatch {cam}"},
             }
             self.client.publish(
                 f"homeassistant/binary_sensor/{dev_id}_{slug}/config",
                 json.dumps(cfg), retain=True)
+            # Initialise a clean retained OFF so a fresh HA never shows a stale
+            # ON from a previous run.
+            self.client.publish(state_topic, "OFF", retain=True)
 
         # Camera snapshot discovery — auto-registers an MQTT camera entity
         cam_cfg = {
@@ -84,10 +132,13 @@ class Publisher:
     def event(self, etype, payload, auto_off=15):
         topic = f"{self.base}/{etype}"
         self.client.publish(f"{topic}/attributes", json.dumps(payload))
-        self.client.publish(topic, "ON")
+        # Retain state so HA recovers the correct value after any reconnect.
+        # off_delay on the HA entity is the primary auto-clear; this timer is a
+        # best-effort belt-and-braces OFF for the normal (no-restart) path.
+        self.client.publish(topic, "ON", retain=True)
         if auto_off:
             threading.Timer(
-                auto_off, lambda: self.client.publish(topic, "OFF")
+                auto_off, lambda: self.client.publish(topic, "OFF", retain=True)
             ).start()
 
     def _read_retained(self, topic, timeout=1.0):

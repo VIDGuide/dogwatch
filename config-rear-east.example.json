@@ -21,6 +21,8 @@
   "stationary_px": 25,
   "motion_energy_thresh": 0.06,
   "dig_sustain_seconds": 4.0,
+  "dig_stationary_px": 50,
   "event_cooldown_seconds": 30,
+  "off_delay_seconds": 180,
   "min_consecutive": 2
 }

@@ -57,8 +57,32 @@ Each camera needs its own `config-<name>.json`. See `config.example.json` and
 | `stationary_px` | Max centroid drift (px) to consider dog "stationary" |
 | `motion_energy_thresh` | Fraction of box pixels changing per frame (0-1) |
 | `dig_sustain_seconds` | Seconds of continuous motion before "digging" fires |
+| `dig_stationary_px` | Max drift (px) allowed while "digging" (looser than `stationary_px`; a digging dog shuffles in place). Defaults to `2 x stationary_px` |
 | `event_cooldown_seconds` | Min seconds between repeated events |
+| `off_delay_seconds` | HA `off_delay` for the binary sensors — auto-reverts to OFF this long after the last ON, even if our OFF message is lost (fixes sensors sticking triggered). Default 180 |
 | `min_consecutive` | Consecutive detections required before firing events |
+
+Set `DOGWATCH_DEBUG=1` in the container environment to log the per-frame
+digging sub-signals (`stationary`, `motion` fraction, held time) so the digging
+thresholds can be tuned against real footage.
+
+## Notification pipeline (`pipeline/`)
+
+The Coral detector only publishes MQTT. The alerting/verification layer lives in
+`pipeline/` and runs outside the container:
+
+| File | Runs as | Role |
+|------|---------|------|
+| `dogwatch-notify.py` | systemd user service (`dogwatch-notify.service`) | Subscribes to MQTT, republishes annotated snapshots to HA, keeps a periodic live still (60s), writes an event log |
+| `dogwatch-check.sh` | cron `*/5 * * * *` | Reads the event log, sends a Telegram ping, runs **Gemini** vision verification (dog presence **and** digging), sends confirm/false-alarm follow-ups |
+| `dogwatch-notify.config.example.json` | — | Template for the camera registry + Telegram chat id used by the notifier |
+
+**Secrets:** the notifier reads its camera URLs and chat id from
+`pipeline/dogwatch-notify.config.json` (gitignored — copy the `.example`).
+The Gemini/Telegram tokens are read at runtime from `~/.openclaw/secrets.json`.
+No credentials are committed. `dogwatch-check.sh` still uses absolute
+`$HOME/.openclaw` paths for its workspace snapshot dir — adjust if you deploy
+elsewhere.
 
 ## License
 

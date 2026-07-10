@@ -4,6 +4,9 @@ config-*.json
 # But keep example files
 !config-*.example.json
 
+# Pipeline notify config holds camera creds + chat id (keep only the example)
+pipeline/dogwatch-notify.config.json
+
 # Generated event clips
 clips/
 clips-rear-east/
