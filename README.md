@@ -149,6 +149,17 @@ Gemini-only setups.
   12.x dropped Python 3.9). Known CVEs fixed in 12.1/12.2 are all in
   PSD/PDF/DDS/FITS parsing; `dogwatch-notify.py` only opens JPEGs it captures
   itself, so exposure is low but not zero if that assumption ever changes.
+- **numpy capped at 1.26.4 (the last 1.x release), opencv-python-headless
+  capped at 4.9.0.80.** pycoral's compiled bindings are built against the
+  numpy 1.x C ABI and break at runtime under numpy 2.x — confirmed on real
+  Coral TPU hardware, not just a version-range conflict pip would catch.
+  This forces opencv-python-headless back from the 4.12.x line (which
+  requires numpy>=2) to 4.9.0.80, the newest release still on numpy<2.
+  4.9.0.80 predates CVE-2025-53644 (a heap buffer write via crafted JPEG,
+  which only affects 4.10.0 and 4.11.0), so this isn't a regression to a
+  known-vulnerable version — it's a deliberate skip over the two versions
+  that were actually affected. Re-check this pin if pycoral ever ships a
+  numpy-2.x-compatible build upstream.
 
 ### Snapshot quality / grey-frame handling
 

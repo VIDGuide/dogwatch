@@ -27,16 +27,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # version that still supports cp39, and should be re-checked whenever the
 # Python/pycoral constraint is revisited.
 #
-# numpy is pinned to 2.0.2 (the last release with cp39 wheels) rather than
-# the 1.x line: opencv-python-headless>=4.12 requires numpy>=2, and
-# pycoral/tflite_runtime only require numpy>=1.16 with no upper bound, so
-# 2.0.2 satisfies both.
+# numpy is pinned to 1.26.4 (the last 1.x release) rather than bumping to
+# numpy 2.x: pycoral's compiled bindings (_pywrap_coral) are built against
+# the numpy 1.x C ABI and break under numpy 2.x at runtime (confirmed on
+# real Coral TPU hardware — pip's resolver alone won't catch this, since it
+# only checks declared version ranges, not compiled ABI compatibility).
+# This forces opencv-python-headless back to 4.9.0.80, the newest release
+# in the numpy<2 line: 4.10.0/4.11.0 carry CVE-2025-53644 (heap buffer
+# write via crafted JPEG) and 4.12.0+ requires numpy>=2, so 4.9.0.80 is the
+# newest version that is both numpy-1.x-compatible and outside the CVE's
+# affected range (4.10.0-4.11.0 only). Re-check this whole chain if the
+# pycoral/numpy-2.x ABI break is ever resolved upstream.
 RUN pip install --no-cache-dir \
     "https://github.com/google-coral/pycoral/releases/download/v2.0.0/tflite_runtime-2.5.0.post1-cp39-cp39-linux_x86_64.whl" \
     "https://github.com/google-coral/pycoral/releases/download/v2.0.0/pycoral-2.0.0-cp39-cp39-linux_x86_64.whl" \
     paho-mqtt==2.1.0 \
-    numpy==2.0.2 \
-    opencv-python-headless==4.12.0.88 \
+    numpy==1.26.4 \
+    opencv-python-headless==4.9.0.80 \
     shapely==2.0.6 \
     requests==2.32.4
 
