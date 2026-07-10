@@ -402,7 +402,7 @@ def _active_tile_fraction(gray_img, tiles: int = 8, tile_std_thresh: float = 15.
     return active / total if total else 1.0
 
 
-def _validate_image(path: str, min_bytes: int = 100_000) -> bool:
+def _validate_image(path: str, min_bytes: int = 15_000) -> bool:
     """Check that the image has real content (not grey / partial-decode corruption).
 
     Three layers, matching `snapshot_quality.is_image_bad` in the container:
@@ -411,6 +411,17 @@ def _validate_image(path: str, min_bytes: int = 100_000) -> bool:
       3. Spatial-spread backstop — a grey field with a localized pixelated
          blob (surviving "motion" region) can pass 1 & 2 but only lights up a
          couple of tiles; real scenes light up almost all of them.
+
+    The size floor default (15KB) is deliberately low: it only needs to
+    separate genuinely truncated/corrupt files (observed as low as 35 bytes)
+    from *any* legitimate JPEG, not from a specific camera's typical size.
+    A fixed floor tuned to one camera's resolution (previously 50KB, sized
+    for the rear-east main stream's ~300KB+ frames) silently rejected every
+    single capture from the lower-res fence "camera" sub-stream (~28KB
+    frames) as "corruption" — the pixel-content checks below (2 and 3) never
+    even ran, because the encoder loop always dies here. Confirmed via a set
+    of fresh captures on that stream: all were valid images (mean/std well
+    outside the grey-glitch range) despite being ~28-30KB.
     """
     try:
         size = os.path.getsize(path)
@@ -495,7 +506,7 @@ def capture_snapshot(camera_name: str) -> str:
         # Guard: ffmpeg may exit without writing the file (timeout / stream
         # error).  os.path.getsize on a missing file raises, so check first.
         if os.path.exists(snap_path) and os.path.getsize(snap_path) > 1000 \
-                and _validate_image(snap_path, 50000):
+                and _validate_image(snap_path):
             return snap_path
         # Corrupted or missing — discard and try HTTP fallback
         print(f"  RTSP frame corrupted/missing, trying HTTP snapshot")
