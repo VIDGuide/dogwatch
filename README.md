@@ -67,7 +67,7 @@ Each camera needs its own `config-<name>.json`. See `config.example.json` and
 |-----|-------------|
 | `rtsp_url` | RTSP stream URL |
 | `snapshot_url` | (Optional) HTTP snapshot URL for clean stills |
-| `crop_roi` | (Optional) `[x1, y1, x2, y2]` normalised 0-1 — zoom into part of frame |
+| `crop_roi` | (Optional) `[x1, y1, x2, y2]` normalised 0-1 — zoom into part of frame. Strongly recommended if the camera's full field of view is much wider than the actual fence/zone area: the detection model's fixed 300x300 input resolution struggles with small/distant dogs in a wide uncropped frame — see `samples/README.md` for measured evidence. Not currently set for the fence `camera` config, which is the most likely cause of missed detections on that camera specifically. |
 | `fence_zone_norm` | Polygon vertices `[[x,y], ...]` normalised 0-1 |
 | `stationary_px` | Max centroid drift (px) to consider dog "stationary" |
 | `motion_energy_thresh` | Fraction of box pixels changing per frame (0-1) |
@@ -165,6 +165,41 @@ a `py_compile` syntax check across all modules, a `bash -n` check on the
 `pipeline/*.sh` scripts, and a full `linux/amd64` Docker image build (no
 Coral hardware available in CI, so this only verifies the image builds and
 installs cleanly — not that inference actually works).
+
+### On-hardware detection smoke test
+
+`tests/hardware_smoke_test.py` runs the real `DogDetector` against the real
+Coral Edge TPU using known-good sample images in `samples/` (real past
+detections, not synthetic test data — see `samples/README.md` for what each
+one is and its measured baseline score). This exists specifically to check
+whether a dependency, model, or runtime change silently hurt detection
+accuracy, without needing to wait for a real dog to walk into frame.
+
+It's not part of the pytest suite or CI — it needs the physical TPU device,
+so it only runs on the deployment host, with the main `dogwatch` container
+stopped first (only one process can hold the Edge TPU delegate at a time):
+
+```bash
+docker stop dogwatch
+docker run --rm --device /dev/apex_0:/dev/apex_0 \
+  -v "$(pwd)/models:/app/models:ro" \
+  -v "$(pwd)/samples:/app/samples:ro" \
+  -v "$(pwd)/tests/hardware_smoke_test.py:/app/hardware_smoke_test.py" \
+  dogtracker-dogwatch python /app/hardware_smoke_test.py
+docker start dogwatch
+```
+
+All 5 current samples are small/distant dogs in full uncropped frames — a
+known, pre-existing weakness of `ssd_mobilenet_v2`'s fixed 300x300 input
+resolution on small objects, confirmed via a direct A/B test against the
+pre-migration `pycoral`/`tflite_runtime` stack to have nothing to do with
+the `ai-edge-litert` migration (identical scores, identical bounding boxes,
+on both stacks). The script tracks each sample's baseline score and flags a
+*regression* (a meaningful drop from that baseline) rather than just
+treating "no detection" as a failure, since these samples were already at
+or near zero before any of this migration work started. See
+`samples/README.md` for the full writeup and the cropping-based mitigation
+(`crop_roi`) that actually helps with this class of small-object miss.
 
 ## Known limitations
 
