@@ -322,7 +322,15 @@ def _publish_live_still(client, camera: str) -> None:
         with open(snap_path, "rb") as f:
             payload = f.read()
         client.publish(topic, payload, qos=0, retain=True)
-        print(f"  Live still for {camera} ({len(payload)} bytes)")
+        # Log the connection state alongside every publish: paho-mqtt's
+        # publish() doesn't raise on a dead/half-closed socket, it just
+        # silently fails to send, so this line used to print "success" every
+        # 60s for hours while the connection was actually in CLOSE_WAIT and
+        # nothing was reaching the broker. If this ever prints connected=False
+        # repeatedly, the watchdog thread (_start_mqtt_watchdog) should force
+        # a reconnect within 30s — if it doesn't, that's the next bug to fix.
+        print(f"  Live still for {camera} ({len(payload)} bytes, "
+              f"connected={client.is_connected()})")
     except Exception as exc:
         print(f"  Failed to publish live still for {camera}: {exc}")
     finally:
@@ -546,6 +554,36 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     client.subscribe(f"{BASE_TOPIC}/#", qos=0)
 
 
+def on_disconnect(client, userdata, flags, reason_code, properties=None):
+    if reason_code != 0:
+        print(f"MQTT disconnected reason_code={reason_code} \u2014 auto-reconnecting")
+
+
+def _start_mqtt_watchdog(client):
+    """Force a reconnect if the connection ever silently dies.
+
+    Without this, a dropped/half-closed socket (e.g. broker restart, network
+    blip) leaves the client in CLOSE_WAIT forever: paho-mqtt's publish()
+    doesn't raise on a dead socket, it just silently fails to send, so the
+    periodic still loop keeps printing 'Live still for ...' every cycle while
+    nothing actually reaches the broker \u2014 the exact bug that left both
+    camera snapshots frozen on Home Assistant with no error anywhere in the
+    logs. Mirrors the same watchdog pattern already used in
+    mqtt_publisher.Publisher (the container-side publisher), which never
+    exhibited this issue.
+    """
+    def _watch():
+        while True:
+            time.sleep(30)
+            try:
+                if not client.is_connected():
+                    print("MQTT not connected \u2014 reconnecting")
+                    client.reconnect()
+            except Exception as exc:
+                print(f"MQTT reconnect attempt failed: {exc}")
+    threading.Thread(target=_watch, daemon=True).start()
+
+
 def on_message(client, userdata, msg):
     global _last_on_ts, _attributes
 
@@ -643,9 +681,17 @@ def on_message(client, userdata, msg):
 def main():
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
     client.on_message = on_message
+    # Survive broker restarts / dropped TCP — see _start_mqtt_watchdog's
+    # docstring for the bug this fixes (silent connection death with no
+    # reconnect, no error, and no indication anywhere that publishes were
+    # going nowhere).
+    client.reconnect_delay_set(min_delay=1, max_delay=60)
     client.connect(MQTT_HOST, MQTT_PORT, 60)
     print(f"Dogwatch notifier listening on {BASE_TOPIC}/#")
+
+    _start_mqtt_watchdog(client)
 
     # Start periodic still loops for each known camera.
     # Each runs as a daemon thread — first still fires immediately so
