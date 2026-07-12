@@ -34,5 +34,8 @@
   "dig_sustain_seconds": 4.0,
   "dig_stationary_px": 50,
   "event_cooldown_seconds": 30,
-  "off_delay_seconds": 180
+  "off_delay_seconds": 180,
+  "debug_capture_enabled": false,
+  "debug_capture_dir": "debug_captures",
+  "debug_capture_retention_days": 7
 }

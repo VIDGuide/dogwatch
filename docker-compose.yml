@@ -20,3 +20,7 @@ services:
       - ./models:/app/models:ro
       - ./clips:/app/clips
       - ./clips-rear-east:/app/clips-rear-east
+      # Mounted even though debug_capture_enabled defaults to false in the
+      # config — the directory is harmless if unused, and this avoids
+      # needing a compose edit + restart just to turn debug capture on.
+      - ./debug_captures:/app/debug_captures

@@ -80,6 +80,9 @@ Each camera needs its own `config-<name>.json`. See `config.example.json` and
 | `startup_timeout_seconds` | Max seconds to wait for the first camera frame before failing loudly (non-zero exit) instead of hanging forever. Default 60 |
 | `mqtt_username` / `mqtt_password` | (Optional) MQTT broker credentials. Can also be set via the `MQTT_USERNAME` / `MQTT_PASSWORD` env vars |
 | `mqtt_tls` | (Optional) Enable TLS for the MQTT connection. Default `false` |
+| `debug_capture_enabled` | (Optional) Archive a low-res + high-res snapshot of every fired event to `debug_capture_dir` for offline review. Default `false`. See "Debug capture" below |
+| `debug_capture_dir` | (Optional) Where to write archived debug snapshots. Default `debug_captures` (mounted as a volume in `docker-compose.yml` regardless of whether capture is enabled, so turning it on doesn't need a compose edit) |
+| `debug_capture_retention_days` | (Optional) Delete archived debug snapshots older than this many days. `0` (default) keeps everything forever — set a real value to bound disk usage |
 
 **MQTT security note:** by default the broker connection is plaintext and
 unauthenticated, which is fine for a broker that never leaves
@@ -90,6 +93,45 @@ different host, a VPN, etc.), set `mqtt_username`/`mqtt_password` and
 Set `DOGWATCH_DEBUG=1` in the container environment to log the per-frame
 digging sub-signals (`stationary`, `motion` fraction, held time) so the digging
 thresholds can be tuned against real footage.
+
+## Debug capture
+
+Off by default. When you need to diagnose a specific miss or false positive
+(see the false-positive example in "Known limitations") it helps to have
+the actual frames on disk rather than relying on whatever happens to still
+be retained on MQTT or in `/tmp` at the time — this was a real gap during a
+past investigation, where a false-positive snapshot had to be grabbed via
+SSH before the next periodic still overwrote it, and there was no separate
+high-resolution copy of what the detector actually saw.
+
+**Container side** (`camera_pipeline.py` / `debug_capture.py`): on every
+fired event (`dog_at_fence` or `digging`), if `debug_capture_enabled` is set
+in that camera's config, saves two files to
+`debug_captures/<camera>/<epoch_ts>_<track_id>_<event_type>_{lowres,highres}.jpg`:
+- `lowres` — the post-crop ROI exactly as fed into the detection model
+- `highres` — the full raw frame, uncropped
+
+Old files are swept once an hour if `debug_capture_retention_days` is set
+(0/unset keeps everything forever).
+
+**Notifier side** (`pipeline/dogwatch-notify.py`): controlled by env vars
+rather than the camera config JSON, since this script runs outside the
+container:
+
+| Env var | Default | Description |
+|---------|---------|--------------|
+| `DOGWATCH_DEBUG_CAPTURE` | unset (off) | Set to `1`/`true`/`yes` to archive the annotated (bbox-drawn) snapshot the notifier sends to Telegram/HA |
+| `DOGWATCH_DEBUG_CAPTURE_DIR` | `debug_captures` | Archive directory (per-camera subfolders, same layout as the container side) |
+| `DOGWATCH_DEBUG_CAPTURE_RETENTION_DAYS` | `0` (forever) | Delete archived files older than this many days; swept once an hour |
+
+This also fixes an unrelated leak found during the same investigation:
+`dogwatch-check.sh`'s cron job only ever *copies* the notifier's `/tmp`
+event snapshots into its own workspace directory — it never deleted the
+`/tmp` originals, so they accumulated indefinitely (70+ had built up over a
+few days on the actual deployment). The notifier now always removes its own
+`/tmp` snapshot ~10 minutes after writing it (comfortably past
+`dogwatch-check.sh`'s ~5 minute cron lookback window), regardless of
+whether debug capture is enabled.
 
 ## Notification pipeline (`pipeline/`)
 

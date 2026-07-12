@@ -14,6 +14,9 @@ pipeline/dogwatch-notify.config.json
 clips/
 clips-rear-east/
 
+# Debug capture archives (opt-in, see debug_capture.py / README)
+debug_captures/
+
 # Downloaded model files
 models/
 

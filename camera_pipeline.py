@@ -15,6 +15,7 @@ import requests
 from requests.auth import HTTPDigestAuth
 
 from behavior import BehaviorMonitor
+from debug_capture import DebugCapture
 from frame_grabber import FrameGrabber
 from mqtt_publisher import Publisher
 from snapshot_quality import is_image_bad
@@ -91,6 +92,12 @@ class CameraPipeline:
         self.clip_dir = cfg.get("clip_dir", "clips")
         self.cooldown = cfg.get("event_cooldown_seconds", 30)
         os.makedirs(self.clip_dir, exist_ok=True)
+
+        # Optional rolling archive of low-res (post-crop, model input) +
+        # high-res (raw frame) snapshots per event, for offline diagnosis.
+        # Off by default — see debug_capture.py and README "Debug capture".
+        self.debug_capture = DebugCapture(cfg, name)
+        self._last_debug_cleanup = 0.0
 
     def _apply_crop(self, frame):
         if self.crop:
@@ -236,6 +243,11 @@ class CameraPipeline:
             else:
                 print(f"[{stamp}] {self.name}: {etype}  track {tid} score={score:.2f}")
 
+            # Optional debug archive: low-res = exactly what the model saw
+            # (post-crop ROI), high-res = the full raw frame, for offline
+            # review of events like false positives. No-op unless enabled.
+            self.debug_capture.save(etype, tid, t0, roi, high_res_frame=frame)
+
             # Send annotated snapshot once per tick in a background thread.
             if self.pub and not snapshot_sent:
                 snapshot_sent = True
@@ -244,3 +256,10 @@ class CameraPipeline:
                     args=(etype, tid, bbox, t0),
                     daemon=True,
                 ).start()
+
+        # Sweep old debug captures at most once per hour rather than on
+        # every tick (a directory listing per frame at several fps would be
+        # wasteful for what's a background housekeeping task).
+        if t0 - self._last_debug_cleanup > 3600:
+            self._last_debug_cleanup = t0
+            self.debug_capture.cleanup()

@@ -8,6 +8,7 @@ Supports multiple cameras via the ``camera`` field in attributes payloads.
 import json
 import io
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -23,6 +24,24 @@ STATUS_FILE = "/tmp/dogwatch-events.jsonl"
 MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 BASE_TOPIC = os.environ.get("MQTT_TOPIC", "dogwatch")
+
+# ---- Debug capture (optional rolling archive of event snapshots) ----
+# Off by default. See README "Debug capture" for the full picture — this is
+# the notifier-side half; camera_pipeline.py's DebugCapture is the
+# container-side half (low-res model input + high-res raw frame). This side
+# archives the annotated (bbox-drawn) snapshot the notifier already builds.
+#
+# Also fixes a real, separate leak found during investigation: every event
+# snapshot written to /tmp (dogwatch_snap_<camera>_<ts>.jpg) was never
+# cleaned up regardless of this setting — 70+ had accumulated over a few
+# days on the actual deployment. _schedule_tmp_cleanup below removes the
+# /tmp copy a safe interval after dogwatch-check.sh's cron window (it reads
+# events up to ~4-5 minutes old) has passed, independent of whether debug
+# capture is enabled.
+DEBUG_CAPTURE_ENABLED = os.environ.get("DOGWATCH_DEBUG_CAPTURE", "").lower() in ("1", "true", "yes")
+DEBUG_CAPTURE_DIR = os.environ.get("DOGWATCH_DEBUG_CAPTURE_DIR", "debug_captures")
+DEBUG_CAPTURE_RETENTION_DAYS = float(os.environ.get("DOGWATCH_DEBUG_CAPTURE_RETENTION_DAYS", "0"))
+TMP_SNAPSHOT_LIFETIME_SECONDS = 600.0  # well past dogwatch-check.sh's ~5 min cron window
 
 # ---- Config (cameras + chat_id) ----
 # Camera registry and chat_id live in an external, gitignored config file so
@@ -364,6 +383,75 @@ def _periodic_still_loop(client, camera: str, interval: float = 60.0) -> None:
         time.sleep(interval)
 
 
+def _archive_debug_snapshot(camera: str, snap_path: str, etype: str, ts: float) -> None:
+    """Copy the annotated snapshot into a rolling per-camera archive.
+
+    No-op entirely unless DOGWATCH_DEBUG_CAPTURE is set. Failures are
+    logged, never raised \u2014 this must never interrupt the actual
+    notify/alert flow.
+    """
+    if not DEBUG_CAPTURE_ENABLED:
+        return
+    try:
+        cam_dir = os.path.join(DEBUG_CAPTURE_DIR, camera)
+        os.makedirs(cam_dir, exist_ok=True)
+        dest = os.path.join(cam_dir, f"{int(ts)}_{etype}_notify.jpg")
+        shutil.copy2(snap_path, dest)
+    except Exception as exc:
+        print(f"  debug_capture: failed to archive {snap_path}: {exc}")
+
+
+def _cleanup_debug_captures() -> None:
+    """Delete archived debug snapshots older than DEBUG_CAPTURE_RETENTION_DAYS.
+
+    A retention of 0 means keep forever. No-op if debug capture is disabled.
+    """
+    if not DEBUG_CAPTURE_ENABLED or not DEBUG_CAPTURE_RETENTION_DAYS:
+        return
+    cutoff = time.time() - (DEBUG_CAPTURE_RETENTION_DAYS * 86400)
+    try:
+        for cam_dir_name in os.listdir(DEBUG_CAPTURE_DIR):
+            cam_dir = os.path.join(DEBUG_CAPTURE_DIR, cam_dir_name)
+            if not os.path.isdir(cam_dir):
+                continue
+            for fname in os.listdir(cam_dir):
+                fpath = os.path.join(cam_dir, fname)
+                try:
+                    if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
+                        os.remove(fpath)
+                except OSError:
+                    continue
+    except FileNotFoundError:
+        pass
+
+
+def _cleanup_tmp_snapshot_later(snap_path: str, delay: float = TMP_SNAPSHOT_LIFETIME_SECONDS) -> None:
+    """Schedule removal of a /tmp event snapshot after *delay* seconds.
+
+    Fixes a real leak: dogwatch_snap_<camera>_<ts>.jpg files written by
+    capture_snapshot() were never removed by anything \u2014 dogwatch-check.sh
+    only ever *copies* them (see its shutil.copy2 call) into the workspace
+    snapshot dir, it never deletes the /tmp original. The delay is long
+    enough to safely outlast dogwatch-check.sh's ~5 minute cron lookback
+    window, so its copy always happens first.
+    """
+    def _remove():
+        try:
+            os.remove(snap_path)
+        except OSError:
+            pass
+    t = threading.Timer(delay, _remove)
+    t.daemon = True
+    t.start()
+
+
+def _periodic_debug_cleanup_loop(interval: float = 3600.0) -> None:
+    """Background loop: sweep old debug captures once per hour."""
+    while True:
+        _cleanup_debug_captures()
+        time.sleep(interval)
+
+
 def send_telegram_text(text: str) -> bool:
     url = f"{TG_API}/sendMessage"
     data = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": text}).encode()
@@ -657,6 +745,13 @@ def on_message(client, userdata, msg):
                 capture_ts = attr.get("ts", now) if attr else now
                 publish_image_to_mqtt(client, snap_path, camera, capture_ts)
 
+                # Optional rolling archive for offline diagnosis (off by
+                # default) + always-on cleanup of the /tmp original (a real
+                # leak regardless of this setting — see
+                # _cleanup_tmp_snapshot_later's docstring).
+                _archive_debug_snapshot(camera, snap_path, slug, capture_ts)
+                _cleanup_tmp_snapshot_later(snap_path)
+
                 if slug == "dog_at_fence":
                     caption = f"🐕 Dog at fence ({camera}) @ {ts_str}"
                 elif slug == "digging":
@@ -687,6 +782,11 @@ def main():
     print(f"Dogwatch notifier listening on {BASE_TOPIC}/#")
 
     _start_mqtt_watchdog(client)
+
+    if DEBUG_CAPTURE_ENABLED:
+        threading.Thread(target=_periodic_debug_cleanup_loop, daemon=True).start()
+        print(f"  Debug capture enabled -> {DEBUG_CAPTURE_DIR}/ "
+              f"(retention: {DEBUG_CAPTURE_RETENTION_DAYS or 'forever'} days)")
 
     # Start periodic still loops for each known camera.
     # Each runs as a daemon thread — first still fires immediately so
