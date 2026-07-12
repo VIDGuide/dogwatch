@@ -110,7 +110,7 @@ class TestEvaluate:
         gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         tr = Track(1, (80, 120, 120, 150), t=time.time())
         events = mon.evaluate({1: tr}, gray)
-        assert ("dog_at_fence", 1, tr.bbox) in events
+        assert ("dog_at_fence", 1, tr.bbox, tr.score) in events
 
     def test_no_event_when_out_of_zone(self):
         mon = BehaviorMonitor(make_cfg(), FRAME_W, FRAME_H)
@@ -143,7 +143,7 @@ class TestEvaluate:
         tr = Track(1, (80, 120, 120, 150), t=time.time())
         tr.update((80, 120, 120, 150), t=time.time())  # now has 2 history entries
         events = mon.evaluate({1: tr}, gray)
-        assert ("dog_at_fence", 1, tr.bbox) in events
+        assert ("dog_at_fence", 1, tr.bbox, tr.score) in events
 
     def test_cooldown_suppresses_repeat_event(self):
         mon = BehaviorMonitor(make_cfg(event_cooldown_seconds=100), FRAME_W, FRAME_H)

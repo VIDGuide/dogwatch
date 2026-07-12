@@ -66,6 +66,7 @@ Each camera needs its own `config-<name>.json`. See `config.example.json` and
 | Key | Description |
 |-----|-------------|
 | `rtsp_url` | RTSP stream URL |
+| `score_threshold` | Minimum detection confidence (0-1) required to fire an event. Default 0.4. Raise this if you're seeing false positives (fence posts, shadows, soil texture misidentified as a dog) — see "Known limitations" below for a documented example. Each event's `attributes` MQTT payload now includes the actual detection `score`, so you can check how confident a specific false positive was before deciding how far to raise this. |
 | `snapshot_url` | (Optional) HTTP snapshot URL for clean stills |
 | `crop_roi` | (Optional) `[x1, y1, x2, y2]` normalised 0-1 — zoom into part of frame. Strongly recommended if the camera's full field of view is much wider than the actual fence/zone area: the detection model's fixed 300x300 input resolution struggles with small/distant dogs in a wide uncropped frame — see `samples/README.md` for measured evidence. Not currently set for the fence `camera` config, which is the most likely cause of missed detections on that camera specifically. |
 | `fence_zone_norm` | Polygon vertices `[[x,y], ...]` normalised 0-1 |
@@ -226,6 +227,17 @@ or near zero before any of this migration work started. See
   tensor resizing/padding, output tensor parsing for SSD-style detection
   models). No compiled bindings are involved on the Python side anymore;
   the only native component is `libedgetpu.so` itself.
+- **False positives on fence/ground geometry.** `ssd_mobilenet_v2` can
+  occasionally misidentify high-contrast vertical/horizontal lines (fence
+  rails, retaining wall beams) plus shadows on dirt/soil as a dog,
+  especially on a low-quality/heavily-compressed frame. Confirmed via a
+  real event (verified independently with Gemini vision, which found no
+  identifiable canine features in the flagged region — just a wooden beam,
+  dirt, and shadow). Detection events now include the actual confidence
+  `score` in their MQTT `attributes` payload (previously dropped
+  silently between `detector.py` and the published event), so a run of
+  false positives can be checked for a common low-confidence pattern and
+  used to inform raising `score_threshold` for that camera.
 
 ### Snapshot quality / grey-frame handling
 

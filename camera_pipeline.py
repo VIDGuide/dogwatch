@@ -208,16 +208,19 @@ class CameraPipeline:
         roi = self._apply_crop(frame)
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         dets = detector.detect(roi)
-        tracks = self.tracker.update([d["bbox"] for d in dets], t0)
+        tracks = self.tracker.update(
+            [d["bbox"] for d in dets], t0, scores=[d["score"] for d in dets]
+        )
         events = self.monitor.evaluate(tracks, gray)
 
         # Annotate one snapshot per tick (first event only) so we don't spam.
         snapshot_sent = False
 
-        for etype, tid, bbox in events:
+        for etype, tid, bbox, score in events:
             payload = {
                 "track": tid,
                 "bbox": [int(v) for v in bbox],
+                "score": round(float(score), 3),
                 "camera": self.name,
                 "frame_w": self.w,
                 "frame_h": self.h,
@@ -229,9 +232,9 @@ class CameraPipeline:
             if etype == "digging":
                 fn = os.path.join(self.clip_dir, f"dig_{int(t0)}_{tid}.jpg")
                 cv2.imwrite(fn, frame)
-                print(f"[{stamp}] {self.name}: DIGGING  track {tid} -> {fn}")
+                print(f"[{stamp}] {self.name}: DIGGING  track {tid} score={score:.2f} -> {fn}")
             else:
-                print(f"[{stamp}] {self.name}: {etype}  track {tid}")
+                print(f"[{stamp}] {self.name}: {etype}  track {tid} score={score:.2f}")
 
             # Send annotated snapshot once per tick in a background thread.
             if self.pub and not snapshot_sent:

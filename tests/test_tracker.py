@@ -125,3 +125,29 @@ class TestCentroidTracker:
         c1 = Track._centroid((0, 0, 10, 10))   # (5, 5)
         c2 = Track._centroid((5, 5, 15, 15))   # (10, 10)
         assert math.isclose(math.dist(c1, c2), math.dist((5, 5), (10, 10)))
+
+    def test_score_defaults_to_zero_when_not_provided(self):
+        ct = CentroidTracker()
+        tracks = ct.update([(0, 0, 10, 10)], t=0.0)
+        assert tracks[1].score == 0.0
+
+    def test_score_recorded_on_new_track(self):
+        ct = CentroidTracker()
+        tracks = ct.update([(0, 0, 10, 10)], t=0.0, scores=[0.87])
+        assert tracks[1].score == 0.87
+
+    def test_score_updated_on_reassignment(self):
+        ct = CentroidTracker(max_distance=50)
+        ct.update([(0, 0, 10, 10)], t=0.0, scores=[0.5])
+        tracks = ct.update([(2, 2, 12, 12)], t=1.0, scores=[0.93])
+        assert tracks[1].score == 0.93
+
+    def test_scores_matched_to_correct_detection_by_index(self):
+        ct = CentroidTracker(max_distance=20)
+        tracks = ct.update(
+            [(0, 0, 10, 10), (200, 200, 210, 210)],
+            t=0.0,
+            scores=[0.3, 0.9],
+        )
+        assert tracks[1].score == 0.3
+        assert tracks[2].score == 0.9

@@ -9,9 +9,10 @@ import math
 
 
 class Track:
-    def __init__(self, tid, bbox, t):
+    def __init__(self, tid, bbox, t, score=0.0):
         self.id = tid
         self.bbox = bbox
+        self.score = score                           # latest detection confidence
         self.last_seen = t
         self.misses = 0
         self.dig_since = None                       # used by BehaviorMonitor
@@ -22,8 +23,9 @@ class Track:
         x0, y0, x1, y1 = b
         return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
 
-    def update(self, bbox, t, keep_seconds=10.0):
+    def update(self, bbox, t, score=0.0, keep_seconds=10.0):
         self.bbox = bbox
+        self.score = score
         self.last_seen = t
         self.misses = 0
         self.history.append((t, self._centroid(bbox), bbox))
@@ -38,8 +40,12 @@ class CentroidTracker:
         self.max_misses = max_misses
         self._next = 1
 
-    def update(self, detections, t):
-        """detections: list of bbox tuples. Returns {tid: Track}."""
+    def update(self, detections, t, scores=None):
+        """detections: list of bbox tuples. scores: parallel list of
+        detection confidences (optional — defaults to 0.0 for callers that
+        don't track it). Returns {tid: Track}."""
+        if scores is None:
+            scores = [0.0] * len(detections)
         centroids = [Track._centroid(d) for d in detections]
         assigned = set()
 
@@ -53,14 +59,14 @@ class CentroidTracker:
                 if d < best_d:
                     best, best_d = i, d
             if best is not None:
-                tr.update(detections[best], t)
+                tr.update(detections[best], t, score=scores[best])
                 assigned.add(best)
             else:
                 tr.misses += 1
 
         for i, d in enumerate(detections):
             if i not in assigned:
-                self.tracks[self._next] = Track(self._next, d, t)
+                self.tracks[self._next] = Track(self._next, d, t, score=scores[i])
                 self._next += 1
 
         for tid in [tid for tid, tr in self.tracks.items()

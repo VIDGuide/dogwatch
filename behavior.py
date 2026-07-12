@@ -80,7 +80,7 @@ class BehaviorMonitor:
         return drift <= limit
 
     def evaluate(self, tracks, gray):
-        """Return [(event_type, track_id, bbox), ...] to publish."""
+        """Return [(event_type, track_id, bbox, score), ...] to publish."""
         events = []
         now = time.time()
         for tid, tr in tracks.items():
@@ -93,7 +93,7 @@ class BehaviorMonitor:
             if len(tr.history) < self.min_consecutive:
                 continue
 
-            self._maybe_emit(events, "dog_at_fence", tid, tr.bbox, now)
+            self._maybe_emit(events, "dog_at_fence", tid, tr.bbox, tr.score, now)
 
             stationary = self.is_stationary(tr, max_drift=self.dig_stationary_px)
             motion = self.intra_box_motion(gray, tr.bbox)
@@ -110,15 +110,15 @@ class BehaviorMonitor:
                 if tr.dig_since is None:
                     tr.dig_since = now
                 elif now - tr.dig_since >= self.dig_seconds:
-                    self._maybe_emit(events, "digging", tid, tr.bbox, now)
+                    self._maybe_emit(events, "digging", tid, tr.bbox, tr.score, now)
             else:
                 tr.dig_since = None
 
         self.prev_gray = gray
         return events
 
-    def _maybe_emit(self, events, etype, tid, bbox, now):
+    def _maybe_emit(self, events, etype, tid, bbox, score, now):
         key = (etype, tid)
         if now - self._last_event.get(key, 0.0) >= self.cooldown:
             self._last_event[key] = now
-            events.append((etype, tid, bbox))
+            events.append((etype, tid, bbox, score))
