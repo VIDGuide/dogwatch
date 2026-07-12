@@ -133,6 +133,20 @@ few days on the actual deployment). The notifier now always removes its own
 `dogwatch-check.sh`'s ~5 minute cron lookback window), regardless of
 whether debug capture is enabled.
 
+**Batch-labeling archived captures:** `tests/gemini_batch_label.py` runs a
+directory (or specific file list) of archived snapshots through Gemini
+vision and writes a CSV (`path,dog,confidence,notes`) — useful for turning
+a pile of past events into rough validation data (how many fired events
+were real dogs vs false positives, and why) without reviewing each image
+by hand:
+```bash
+python tests/gemini_batch_label.py --dir debug_captures/rear-east --sample 20 --out labels.csv
+```
+Subject to the Gemini free tier's daily request quota (resets at midnight
+Pacific time) — the script retries on rate-limit errors with backoff, but
+if the whole day's quota is exhausted, it'll just error out per-image
+until the quota resets.
+
 ## Notification pipeline (`pipeline/`)
 
 The Coral detector only publishes MQTT. The alerting/verification layer lives in
