@@ -236,58 +236,53 @@ def send_telegram_photo(photo_path: str, caption: str) -> bool:
         return False
 
 
-def _read_mqtt_retained(client, topic: str, timeout: float = 1.0) -> str | None:
-    """Read the last retained message on *topic* via one-shot subscribe.
 
-    Returns the payload as a str, or *None* if there is no retained
-    message or the read times out.
-
-    This is called from inside ``on_message`` on the same thread that
-    services the MQTT network loop (``loop_forever()`` in ``main()``), so
-    unlike ``mqtt_publisher.Publisher._read_retained`` (which is called from
-    a *different* thread than the one running ``loop_start()``), we can't
-    wait on an event set by a callback \u2014 that callback would never fire
-    because this thread would be blocked waiting on itself. Manually pumping
-    ``client.loop()`` here is the correct, reentrant way to service the
-    socket for this one-shot request/response while already inside a
-    callback on the same thread.
-    """
-    result = [None]
-
-    def _cb(_client, _userdata, msg):
-        result[0] = msg.payload.decode()
-
-    client.message_callback_add(topic, _cb)
-    client.subscribe(topic, qos=0)
-
-    deadline = time.time() + timeout
-    while result[0] is None and time.time() < deadline:
-        client.loop(timeout=0.05)
-
-    client.unsubscribe(topic)
-    client.message_callback_remove(topic)
-    return result[0]
+# Per-camera last-published snapshot timestamp, kept in local memory instead
+# of round-tripping through the broker on every publish. See
+# publish_image_to_mqtt's docstring for why this replaced a broker read.
+_last_snapshot_ts: dict = {}
 
 
 def publish_image_to_mqtt(client, image_path: str, camera: str, capture_ts: float | None = None) -> None:
     """Publish annotated snapshot to MQTT for HA camera entity.
 
-    Uses a companion ``snapshot/ts`` guard topic to avoid overwriting
-    a newer snapshot with an older frame.
+    Guards against overwriting a newer snapshot with an older frame using
+    an in-memory per-camera timestamp (_last_snapshot_ts), rather than
+    querying the broker's retained ``snapshot/ts`` topic on every call.
+
+    That broker-read approach (removed) used to open a one-shot subscribe
+    and manually pump ``client.loop()`` from inside ``on_message`` \u2014
+    reentrant by necessity, since ``on_message`` always runs on whatever
+    thread is servicing the network socket (``loop_forever()`` on the main
+    thread here; ``loop_start()``'s background thread would have the exact
+    same problem, since the callback still runs on that same
+    socket-servicing thread either way). In production this occasionally
+    hung inside that reentrant ``client.loop()`` call \u2014 confirmed on the
+    live server: a real dog-at-fence event triggered this exact code path,
+    the notifier's MQTT read loop wedged solid (no crash, no error, but the
+    main thread stopped responding to any further messages \u2014 verified by
+    publishing test messages that got no response), and every Telegram
+    alert after that silently vanished until the service was manually
+    restarted. The daemon-thread periodic stills kept running throughout
+    since they don't go through this code path, which is why HA's snapshot
+    stayed fresh while Telegram went completely silent with zero errors
+    anywhere in the logs.
+
+    The in-memory guard is weaker across a process restart (a fresh
+    process starts with an empty dict, so it could in theory republish an
+    older frame over a newer one from a previous process instance) but
+    that's a far smaller risk than a wedged main loop silently killing all
+    future alerts.
     """
     capture_ts = capture_ts or time.time()
     topic = _snapshot_topic(camera)
     ts_topic = f"{topic}/ts"
 
-    # Check guard: skip if a newer snapshot already exists
-    current = _read_mqtt_retained(client, ts_topic)
-    if current is not None:
-        try:
-            if float(current) > capture_ts:
-                print(f"  Skipping MQTT publish — snapshot/ts has {current} > {capture_ts}")
-                return
-        except ValueError:
-            pass
+    current = _last_snapshot_ts.get(camera)
+    if current is not None and current > capture_ts:
+        print(f"  Skipping MQTT publish — in-memory snapshot ts {current} > {capture_ts}")
+        return
+    _last_snapshot_ts[camera] = capture_ts
 
     # Publish timestamp first, then the JPEG
     client.publish(ts_topic, str(capture_ts), qos=0, retain=True)
