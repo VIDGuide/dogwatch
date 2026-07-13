@@ -27,3 +27,13 @@ __pycache__/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# SQLite event log (persisted via docker volume mount)
+data/
+*.db
+
+# Notifier workspace (check script's snapshot copies)
+notify_workspace/
+
+# Notifier config at repo root (deployed copy, contains creds)
+dogwatch-notify.config.json

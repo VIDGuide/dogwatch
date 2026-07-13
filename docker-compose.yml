@@ -24,3 +24,35 @@ services:
       # config — the directory is harmless if unused, and this avoids
       # needing a compose edit + restart just to turn debug capture on.
       - ./debug_captures:/app/debug_captures
+      # SQLite event log shared across cameras, persisted across restarts.
+      - ./data:/app/data
+
+  notifier:
+    build: ./pipeline
+    container_name: dogwatch-notify
+    restart: unless-stopped
+
+    environment:
+      MQTT_HOST: "172.17.0.1"
+      MQTT_PORT: "1883"
+      MQTT_TOPIC: "dogwatch"
+      # Vision verification (defaults to Gemini free tier via OpenAI-compat
+      # endpoint). Override for a different provider.
+      # DOGWATCH_VISION_API_URL: ""
+      # DOGWATCH_VISION_MODEL: ""
+      # DOGWATCH_VISION_API_KEY: ""
+      # Debug capture (notifier-side annotated snapshots)
+      # DOGWATCH_DEBUG_CAPTURE: "true"
+      # DOGWATCH_DEBUG_CAPTURE_DIR: "/app/debug_captures"
+      # DOGWATCH_DEBUG_CAPTURE_RETENTION_DAYS: "7"
+
+    volumes:
+      # Notify config (camera URLs, chat_id) — gitignored, contains creds.
+      - ./dogwatch-notify.config.json:/app/dogwatch-notify.config.json:ro
+      # Secrets (Telegram bot token, vision API key)
+      - ~/.openclaw/secrets.json:/app/secrets.json:ro
+      # Shared debug capture directory (notifier writes its annotated copies
+      # here alongside the detector container's raw captures).
+      - ./debug_captures:/app/debug_captures
+      # Workspace snapshot dir for the check script
+      - ./notify_workspace:/app/workspace

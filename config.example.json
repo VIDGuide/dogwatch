@@ -37,5 +37,11 @@
   "off_delay_seconds": 180,
   "debug_capture_enabled": false,
   "debug_capture_dir": "debug_captures",
-  "debug_capture_retention_days": 7
+  "debug_capture_retention_days": 7,
+  "event_store_enabled": true,
+  "event_store_path": "data/events.db",
+  "motion_gate_enabled": true,
+  "motion_gate_threshold": 0.005,
+  "motion_gate_pixel_threshold": 25,
+  "motion_gate_max_idle_seconds": 10
 }

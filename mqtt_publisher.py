@@ -25,6 +25,7 @@ class Publisher:
         self._host = host
         self._port = port
         self._ha_discovery = ha_discovery
+        self._geometry = None  # set via publish_geometry() before first event
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if username:
             self.client.username_pw_set(username, password)
@@ -111,6 +112,35 @@ class Publisher:
         self.client.publish(
             f"homeassistant/camera/{dev_id}_snapshot/config",
             json.dumps(cam_cfg), retain=True)
+
+        # Publish detection geometry so the notifier (and any other consumer)
+        # can read the detector's actual resolution and crop config directly
+        # from MQTT rather than maintaining a separate copy. This eliminates
+        # the "stale detect_w/detect_h in dogwatch-notify.config.json" class
+        # of bugs — see commit 55b8619 for the incident this fixes.
+        if self._geometry:
+            self.client.publish(
+                f"{self.base}/geometry",
+                json.dumps(self._geometry), retain=True)
+
+    def publish_geometry(self, detect_w, detect_h, crop_roi=None, snapshot_url=None):
+        """Publish (retained) the detector's resolution and crop config.
+
+        Called once by CameraPipeline after init, and again on every
+        reconnect (via _publish_discovery). The notifier reads this to
+        correctly map bounding boxes onto its own snapshot.
+        """
+        self._geometry = {
+            "detect_w": detect_w,
+            "detect_h": detect_h,
+        }
+        if crop_roi:
+            self._geometry["crop_roi"] = list(crop_roi)
+        if snapshot_url:
+            self._geometry["snapshot_url"] = snapshot_url
+        self.client.publish(
+            f"{self.base}/geometry",
+            json.dumps(self._geometry), retain=True)
 
     def snapshot(self, jpeg_bytes, capture_ts=None):
         """Publish an annotated JPEG frame to the snapshot topic (retained).

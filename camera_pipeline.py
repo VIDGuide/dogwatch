@@ -16,7 +16,9 @@ from requests.auth import HTTPDigestAuth
 
 from behavior import BehaviorMonitor
 from debug_capture import DebugCapture
+from event_store import EventStore
 from frame_grabber import FrameGrabber
+from motion_gate import MotionGate
 from mqtt_publisher import Publisher
 from snapshot_quality import is_image_bad
 from tracker import CentroidTracker
@@ -99,6 +101,17 @@ class CameraPipeline:
             print(f"[{name}] MQTT connection failed: {e} — running without publishing")
             self.pub = None
         self.full_w, self.full_h = full_w, full_h
+
+        # Publish detection geometry to MQTT so the notifier (and any other
+        # consumer) always knows the exact resolution and crop the detector
+        # is running at — single source of truth, no manual sync needed.
+        if self.pub:
+            self.pub.publish_geometry(
+                detect_w=self.w,
+                detect_h=self.h,
+                crop_roi=list(self.crop_norm) if self.crop_norm else None,
+                snapshot_url=cfg.get("snapshot_url"),
+            )
         self.clip_dir = cfg.get("clip_dir", "clips")
         self.cooldown = cfg.get("event_cooldown_seconds", 30)
         os.makedirs(self.clip_dir, exist_ok=True)
@@ -108,6 +121,17 @@ class CameraPipeline:
         # Off by default — see debug_capture.py and README "Debug capture".
         self.debug_capture = DebugCapture(cfg, name)
         self._last_debug_cleanup = 0.0
+
+        # Motion gate: skip the TPU entirely when nothing is moving in the
+        # scene. Eliminates false positives from static structural elements
+        # (beams, railings, shadows) that the model consistently mis-classifies
+        # as dogs at 0.5-0.7 confidence. Enabled by default; disable per-camera
+        # with "motion_gate_enabled": false.
+        self.motion_gate = MotionGate(cfg)
+
+        # SQLite event log — replaces grepping container stdout for event
+        # history. Shared db across all cameras (thread-safe).
+        self.event_store = EventStore(cfg, camera_name=name)
 
     def _apply_crop(self, frame):
         if self.crop:
@@ -224,6 +248,14 @@ class CameraPipeline:
         # Crop to region of interest before detection (zoom effect).
         roi = self._apply_crop(frame)
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+        # Motion gate: skip the expensive TPU inference when the scene is
+        # completely static. This eliminates false positives from permanent
+        # structural elements (beams, railings, fence posts) that never move
+        # but that the model consistently scores at 0.5-0.7 confidence.
+        if not self.motion_gate.should_detect(gray, t0):
+            return
+
         dets = detector.detect(roi)
         tracks = self.tracker.update(
             [d["bbox"] for d in dets], t0, scores=[d["score"] for d in dets]
@@ -246,6 +278,13 @@ class CameraPipeline:
             if self.pub:
                 self.pub.event(etype, payload, auto_off=120)
             stamp = time.strftime("%H:%M:%S")
+
+            # Persist to SQLite for easy post-hoc querying without log grep.
+            self.event_store.log_event(
+                event_type=etype, track_id=tid, score=score,
+                bbox=bbox, frame_w=self.w, frame_h=self.h, ts=t0,
+                metadata={"motion_fraction": self.motion_gate.motion_fraction},
+            )
             if etype == "digging":
                 fn = os.path.join(self.clip_dir, f"dig_{int(t0)}_{tid}.jpg")
                 cv2.imwrite(fn, frame)
