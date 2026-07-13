@@ -6,12 +6,18 @@
       "detect_w": 640,
       "detect_h": 480
     },
+    "_comment_camera": "detect_w/detect_h/crop_roi here MUST always match this camera's crop_roi and rtsp_url resolution in the container's own config.json. If config.json's crop_roi or stream resolution changes, update this entry too — see README 'Keeping the notifier in sync'.",
     "rear-east": {
       "snapshot_url": "http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture",
       "snapshot_rtsp_fallback": "rtsp://user:pass@nvr-ip:554/Streaming/Channels/1201",
       "detect_w": 864,
       "detect_h": 727,
-      "crop_roi": [0.70, 0.10, 1.0, 0.55]
+      "crop_roi": [
+        0.70,
+        0.10,
+        1.0,
+        0.55
+      ]
     }
   }
 }

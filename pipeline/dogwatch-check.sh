@@ -299,6 +299,18 @@ for p in pending:
     event_label = p['type'].replace('_', ' ').title()
 
     if result is None:
+        # Vision API call failed (rate limit, network error, bad response,
+        # etc.) — say so explicitly rather than going silent. Previously
+        # this just `continue`d, so a quota exhaustion looked identical to
+        # "nothing happened" from the user's perspective: the initial alert
+        # + photo still arrived (unaffected — that path doesn't call vision
+        # at all), but the "Verifying with vision…" promise was never
+        # followed up on, with zero visible sign anything went wrong.
+        tg_send(
+            f'⚠️ *Vision check failed* for {event_label} at {p["time"]} — '
+            f'see script logs for the API error. Detection alert above is '
+            f'still valid; this only affects the confirm/false-alarm follow-up.'
+        )
         continue
 
     verdict = result['dog']

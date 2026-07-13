@@ -72,7 +72,17 @@ class CameraPipeline:
             self.h, self.w = full_h, full_w
             print(f"[{name}] Stream up: {self.w}x{self.h}")
 
-        self.tracker = CentroidTracker()
+        # Centroid-matching distance/miss tolerance scale with the resolution
+        # the detector actually runs on (post-crop): a dog moving the same
+        # real-world amount covers more pixels at higher resolution, so a
+        # fixed default here would fragment tracks into a new ID every frame
+        # on a tightly-cropped, high-res feed. Override per-camera in config
+        # if the default (tuned for a ~640-720px-wide detection frame) is a
+        # poor fit for a much larger or smaller crop.
+        self.tracker = CentroidTracker(
+            max_distance=cfg.get("tracker_max_distance", 120),
+            max_misses=cfg.get("tracker_max_misses", 5),
+        )
         self.monitor = BehaviorMonitor(cfg, self.w, self.h)
         try:
             self.pub = Publisher(
