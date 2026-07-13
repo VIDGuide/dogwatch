@@ -83,6 +83,15 @@ Each camera needs its own `config-<name>.json`. See `config.example.json` and
 | `debug_capture_enabled` | (Optional) Archive a low-res + high-res snapshot of every fired event to `debug_capture_dir` for offline review. Default `false`. See "Debug capture" below |
 | `debug_capture_dir` | (Optional) Where to write archived debug snapshots. Default `debug_captures` (mounted as a volume in `docker-compose.yml` regardless of whether capture is enabled, so turning it on doesn't need a compose edit) |
 | `debug_capture_retention_days` | (Optional) Delete archived debug snapshots older than this many days. `0` (default) keeps everything forever — set a real value to bound disk usage |
+| `target_fps` | Detection sample rate. The frame grabber decodes at `2 × target_fps`. Default 5 (= 10 decode/s). For high-res main streams (>1080p), use 2–3 to keep CPU decode cost reasonable. Dogs move slowly enough that 2fps is fine for detection cadence. |
+| `tracker_max_distance` | (Optional) Max pixel distance between centroids to match a detection to an existing track. Default 120. Scale up for high-res crops where dogs traverse more pixels per frame at the same real-world speed. |
+| `tracker_max_misses` | (Optional) Frames a track can go unmatched before deletion. Default 5. |
+| `event_store_enabled` | (Optional) Log events to a SQLite database. Default `true`. |
+| `event_store_path` | (Optional) Path to the SQLite event database. Default `data/events.db`. |
+| `motion_gate_enabled` | (Optional) Skip TPU inference when nothing is moving. Default `true`. Eliminates false positives from static structural elements (beams, railings). |
+| `motion_gate_threshold` | (Optional) Fraction of pixels that must change to trigger detection. Default 0.005 (0.5%). |
+| `motion_gate_pixel_threshold` | (Optional) Per-pixel abs-diff floor for noise filtering. Default 25. |
+| `motion_gate_max_idle_seconds` | (Optional) Force a detection pass at least this often even if no motion, so a dog that walks in and stops isn't missed. Default 10. |
 
 **MQTT security note:** by default the broker connection is plaintext and
 unauthenticated, which is fine for a broker that never leaves
@@ -257,6 +266,62 @@ treating "no detection" as a failure, since these samples were already at
 or near zero before any of this migration work started. See
 `samples/README.md` for the full writeup and the cropping-based mitigation
 (`crop_roi`) that actually helps with this class of small-object miss.
+
+## Performance tuning
+
+### CPU usage from RTSP stream decode
+
+Video frame decoding (H.264/HEVC → raw pixels) is done by ffmpeg **on CPU**
+via OpenCV's `VideoCapture` backend — not on the Coral TPU (which only handles
+model inference). For high-resolution streams (e.g. a 2592×1944 main stream),
+this can be a significant CPU consumer.
+
+Levers to reduce decode CPU:
+
+| Approach | Effort | Effect |
+|----------|--------|--------|
+| Lower `target_fps` | Config change | The frame grabber decodes at `2 × target_fps`. Use 2–3 for high-res streams; dogs move slowly enough that 2fps detection cadence is fine. |
+| Use the sub-stream for detection, main for snapshots | Config change | Most cameras expose a low-res sub-stream (e.g. 640×480). Use it as `rtsp_url` with no `crop_roi` for cheap detection, and let the notifier use the main stream for annotated snapshot capture. |
+| Motion gate (default: on) | Already active | When nothing moves, no TPU inference runs — but the frame grabber still decodes. The above two approaches reduce this baseline decode cost. |
+
+### GPU-accelerated decode (NVIDIA)
+
+With an NVIDIA GPU, ffmpeg can use **NVDEC** (hardware decode) to offload
+H.264/HEVC decoding entirely off the CPU. Two integration paths:
+
+1. **OpenCV `cudacodec.VideoReader`** — OpenCV's CUDA module includes a
+   GPU-based video reader that uses NVDEC directly. Requires building
+   OpenCV from source with `-D WITH_CUDA=ON -D WITH_NVCUVID=ON` (the pip
+   `opencv-python-headless` package does NOT include this). Gives you
+   decoded frames as `cv2.cuda.GpuMat` which can be downloaded to numpy.
+   This is the cleanest path for this project — `FrameGrabber` would switch
+   from `cv2.VideoCapture(url, cv2.CAP_FFMPEG)` to
+   `cv2.cudacodec.createVideoReader(url)`.
+
+2. **ffmpeg with `hwaccel cuvid`** — Build ffmpeg with `--enable-cuvid
+   --enable-nvdec`. OpenCV's FFmpeg backend can then use hardware decode via
+   the `OPENCV_FFMPEG_CAPTURE_OPTIONS` environment variable:
+   ```
+   OPENCV_FFMPEG_CAPTURE_OPTIONS="hwaccel;cuda|video_codec;h264_cuvid|rtsp_transport;tcp"
+   ```
+   This requires the NVIDIA Container Toolkit (for GPU access inside Docker)
+   and a custom-built ffmpeg in the container image. Less clean than option 1
+   but doesn't require building OpenCV from source.
+
+Either path reduces CPU decode cost to near-zero regardless of resolution or
+fps, since the GPU's dedicated NVDEC engine handles it.
+
+**Prerequisites:**
+- NVIDIA GPU with NVDEC support (most GeForce/Quadro from Maxwell onwards)
+- NVIDIA driver + Container Toolkit (`nvidia-docker2` or `--gpus all`)
+- For path 1: custom OpenCV build with CUDA. For path 2: custom ffmpeg build.
+
+The Dockerfile does not include GPU decode support today. When you add a GPU,
+the recommended path is to create a `Dockerfile.gpu` variant that builds
+OpenCV with CUDA support and uses `cv2.cudacodec.createVideoReader`, with a
+runtime flag or config key (`"gpu_decode": true`) to switch `FrameGrabber`
+between CPU and GPU paths. This keeps the existing CPU-only image working on
+hardware without a GPU.
 
 ## Known limitations
 
