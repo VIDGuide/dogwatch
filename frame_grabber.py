@@ -5,24 +5,20 @@ behind the stream's buffer and end up analysing stale video. FrameGrabber
 keeps the latest frame in a background thread and lets the main loop sample
 it at whatever rate it likes.
 
-Frame quality: the background loop validates each decoded frame against
-snapshot_quality.is_image_bad() — grey/corrupt frames from mid-GOP connects
-or HEVC decode glitches are silently discarded rather than stored as the
-"latest" frame. This means the main loop's .read() always returns either
-None (no good frame yet) or a frame that passed the same quality checks
-the snapshot pipeline uses, eliminating the inconsistency where snapshots
-used -skip_frame nokey while detection used a naive .read().
+Frame quality validation is NOT done here — it was briefly tried but the
+per-frame is_image_bad() call on high-resolution streams (2592x1944) burned
+excessive CPU in the tight decode loop. Quality checks belong in tick()
+(which runs at detection fps, not stream fps) where the motion gate already
+provides the first-pass gating.
 """
 import threading
 import time
 
 import cv2
 
-from snapshot_quality import is_image_bad
-
 
 class FrameGrabber:
-    """Background reader that always holds only the newest *valid* frame."""
+    """Background reader that always holds only the newest frame."""
 
     def __init__(self, url, reconnect_delay=0.5, target_fps=5):
         self.url = url
@@ -36,9 +32,6 @@ class FrameGrabber:
         self.frame = None
         self.running = True
         self.ready = threading.Event()
-        # Stats for monitoring/debugging
-        self._good_count = 0
-        self._bad_count = 0
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self):
@@ -50,23 +43,6 @@ class FrameGrabber:
                 self.cap.release()
                 self.cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
                 continue
-
-            # Discard grey/corrupt frames (mid-GOP connects, HEVC decode
-            # glitches).  This matches the quality gate used in the snapshot
-            # pipeline (pipeline/dogwatch-notify.py) so detection never runs
-            # on frames that would be rejected anyway if they appeared as a
-            # snapshot — a mismatch that previously caused the detection loop
-            # to process degraded/blurry/grey frames that the snapshot path
-            # would have retried or discarded.
-            if is_image_bad(f):
-                self._bad_count += 1
-                # Don't sleep full interval on a bad frame — try again quickly
-                # to find the next good one (similar to the snapshot pipeline's
-                # keyframe retry strategy).
-                time.sleep(0.05)
-                continue
-
-            self._good_count += 1
             with self.lock:
                 self.frame = f
                 self.ready.set()
@@ -79,8 +55,3 @@ class FrameGrabber:
     def read(self):
         with self.lock:
             return None if self.frame is None else self.frame.copy()
-
-    @property
-    def stats(self):
-        """Return (good_frames, bad_frames) counts since startup."""
-        return self._good_count, self._bad_count

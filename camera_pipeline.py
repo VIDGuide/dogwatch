@@ -256,6 +256,12 @@ class CameraPipeline:
         if not self.motion_gate.should_detect(gray, t0):
             return
 
+        # Quality check on the cropped ROI (not the full frame — much cheaper).
+        # Discards grey/corrupt frames from mid-GOP connects before wasting a
+        # TPU inference cycle on garbage input.
+        if is_image_bad(roi):
+            return
+
         dets = detector.detect(roi)
         tracks = self.tracker.update(
             [d["bbox"] for d in dets], t0, scores=[d["score"] for d in dets]
