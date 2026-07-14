@@ -1,0 +1,65 @@
+# dogwatch — Coral Edge TPU dog detector (GPU-accelerated decode variant)
+#
+# Identical to the standard Dockerfile except:
+#   - Based on nvidia/cuda base image (provides CUDA runtime for NVDEC)
+#   - Uses cudawarped's pre-built OpenCV wheels with cudacodec/NVCUVID support
+#   - Enables "gpu_decode": true in camera configs to offload H.264/HEVC
+#     frame decode to the GPU's dedicated NVDEC hardware engine, reducing
+#     CPU usage from ~150-700% (stream-resolution-dependent) to near-zero.
+#
+# Requirements:
+#   - NVIDIA GPU with NVDEC support (GeForce/Quadro Maxwell+ i.e. compute >= 5.0)
+#   - NVIDIA driver >= 550 on the host
+#   - NVIDIA Container Toolkit installed (nvidia-ctk runtime configure --runtime=docker)
+#   - docker compose service must include: deploy.resources.reservations.devices
+#     with capabilities: [gpu]
+#
+# Build:   docker compose -f docker-compose.gpu.yml build
+# Run:     docker compose -f docker-compose.gpu.yml up -d
+FROM nvidia/cuda:12.9.0-runtime-ubuntu24.04
+
+# Avoid interactive prompts during apt
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System deps: Python 3.12, ffmpeg (still needed for snapshot pipeline),
+# and libraries OpenCV/CUDA need at runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3-pip \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    udev \
+    usbutils \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make python3.12 the default python3/python
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
+
+# libedgetpu runtime (same community build as the CPU Dockerfile)
+ADD https://github.com/feranick/libedgetpu/releases/download/16.0TF2.19.1-1/libedgetpu1-std_16.0tf2.19.1-1.bookworm_amd64.deb \
+    /tmp/libedgetpu.deb
+RUN dpkg -i /tmp/libedgetpu.deb || true \
+    && apt-get install -f -y \
+    && rm /tmp/libedgetpu.deb
+
+# Python dependencies.
+# Key difference vs standard Dockerfile: opencv-contrib-python from
+# cudawarped's pre-built CUDA wheels (includes cv2.cudacodec with NVDEC).
+# The wheel is hosted on GitHub releases — pip install directly from the URL.
+RUN pip install --no-cache-dir --break-system-packages \
+    ai-edge-litert==2.1.6 \
+    paho-mqtt==2.1.0 \
+    numpy==2.5.1 \
+    shapely==2.1.2 \
+    requests==2.34.2 \
+    && pip install --no-cache-dir --break-system-packages \
+    "https://github.com/cudawarped/opencv-python-cuda-wheels/releases/download/4.12.0.88/opencv_contrib_python-4.12.0.88-cp312-cp312-linux_x86_64.whl"
+
+COPY *.py /app/
+WORKDIR /app
+
+CMD ["python", "-u", "dogwatch.py"]

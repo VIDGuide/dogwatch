@@ -5,11 +5,11 @@ behind the stream's buffer and end up analysing stale video. FrameGrabber
 keeps the latest frame in a background thread and lets the main loop sample
 it at whatever rate it likes.
 
-Frame quality validation is NOT done here — it was briefly tried but the
-per-frame is_image_bad() call on high-resolution streams (2592x1944) burned
-excessive CPU in the tight decode loop. Quality checks belong in tick()
-(which runs at detection fps, not stream fps) where the motion gate already
-provides the first-pass gating.
+Supports two decode backends:
+  - CPU (default): uses cv2.VideoCapture with the FFmpeg backend.
+  - GPU (opt-in via config "gpu_decode": true): uses cv2.cudacodec.VideoReader
+    which offloads H.264/HEVC decode to the GPU's NVDEC hardware engine.
+    Requires the CUDA-enabled OpenCV build (see Dockerfile.gpu).
 """
 import threading
 import time
@@ -17,28 +17,48 @@ import time
 import cv2
 
 
+def _has_cudacodec():
+    """Check if cv2.cudacodec is available at runtime."""
+    return hasattr(cv2, "cudacodec")
+
+
 class FrameGrabber:
     """Background reader that always holds only the newest frame."""
 
-    def __init__(self, url, reconnect_delay=0.5, target_fps=5):
+    def __init__(self, url, reconnect_delay=0.5, target_fps=5, gpu_decode=False):
         self.url = url
         self.reconnect_delay = reconnect_delay
-        # Throttle decode to ~2x the detection fps.  Without this the grabber
-        # decodes every camera at its full native frame rate 24/7 (the main
-        # CPU hog), even though the detection loop only samples a few fps.
         self.min_interval = 1.0 / max(1.0, target_fps * 2)
-        self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         self.lock = threading.Lock()
         self.frame = None
         self.running = True
         self.ready = threading.Event()
+
+        self._gpu_decode = gpu_decode and _has_cudacodec()
+        if gpu_decode and not _has_cudacodec():
+            print("[FrameGrabber] gpu_decode requested but cv2.cudacodec not available — falling back to CPU")
+
+        if self._gpu_decode:
+            # cudacodec params for RTSP: use TCP transport
+            params = cv2.cudacodec.VideoReaderInitParams()
+            params.udpSource = False  # force TCP
+            self._reader = cv2.cudacodec.createVideoReader(url, params=params)
+        else:
+            self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self):
+        if self._gpu_decode:
+            self._loop_gpu()
+        else:
+            self._loop_cpu()
+
+    def _loop_cpu(self):
         while self.running:
             t0 = time.time()
             ok, f = self.cap.read()
-            if not ok:                       # stream dropped — reconnect
+            if not ok:
                 time.sleep(self.reconnect_delay)
                 self.cap.release()
                 self.cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
@@ -46,8 +66,37 @@ class FrameGrabber:
             with self.lock:
                 self.frame = f
                 self.ready.set()
-            # Sleep out the remainder of the frame budget so we don't spin the
-            # CPU decoding frames the detector will never look at.
+            dt = time.time() - t0
+            if dt < self.min_interval:
+                time.sleep(self.min_interval - dt)
+
+    def _loop_gpu(self):
+        while self.running:
+            t0 = time.time()
+            try:
+                ok, gpu_mat = self._reader.nextFrame()
+                if not ok:
+                    time.sleep(self.reconnect_delay)
+                    # Recreate the reader on stream drop
+                    params = cv2.cudacodec.VideoReaderInitParams()
+                    params.udpSource = False
+                    self._reader = cv2.cudacodec.createVideoReader(self.url, params=params)
+                    continue
+                # Download from GPU memory to CPU numpy array
+                f = gpu_mat.download()
+            except Exception:
+                time.sleep(self.reconnect_delay)
+                try:
+                    params = cv2.cudacodec.VideoReaderInitParams()
+                    params.udpSource = False
+                    self._reader = cv2.cudacodec.createVideoReader(self.url, params=params)
+                except Exception:
+                    pass
+                continue
+
+            with self.lock:
+                self.frame = f
+                self.ready.set()
             dt = time.time() - t0
             if dt < self.min_interval:
                 time.sleep(self.min_interval - dt)

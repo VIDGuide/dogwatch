@@ -29,7 +29,11 @@ class CameraPipeline:
 
     def __init__(self, cfg, name):
         self.name = name
-        self.grab = FrameGrabber(cfg["rtsp_url"], target_fps=cfg.get("target_fps", 5))
+        self.grab = FrameGrabber(
+            cfg["rtsp_url"],
+            target_fps=cfg.get("target_fps", 5),
+            gpu_decode=cfg.get("gpu_decode", False),
+        )
 
         # Optional HTTP snapshot URL (NVR ISAPI) for clean snapshots.
         # Hikvision format: http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture

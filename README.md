@@ -92,6 +92,7 @@ Each camera needs its own `config-<name>.json`. See `config.example.json` and
 | `motion_gate_threshold` | (Optional) Fraction of pixels that must change to trigger detection. Default 0.005 (0.5%). |
 | `motion_gate_pixel_threshold` | (Optional) Per-pixel abs-diff floor for noise filtering. Default 25. |
 | `motion_gate_max_idle_seconds` | (Optional) Force a detection pass at least this often even if no motion, so a dog that walks in and stops isn't missed. Default 10. |
+| `gpu_decode` | (Optional) Offload RTSP frame decode to GPU via NVDEC. Default `false`. Requires `Dockerfile.gpu` / `docker-compose.gpu.yml` and an NVIDIA GPU. See "Performance tuning → GPU-accelerated decode" above. |
 
 **MQTT security note:** by default the broker connection is plaintext and
 unauthenticated, which is fine for a broker that never leaves
@@ -312,16 +313,37 @@ Either path reduces CPU decode cost to near-zero regardless of resolution or
 fps, since the GPU's dedicated NVDEC engine handles it.
 
 **Prerequisites:**
-- NVIDIA GPU with NVDEC support (most GeForce/Quadro from Maxwell onwards)
-- NVIDIA driver + Container Toolkit (`nvidia-docker2` or `--gpus all`)
-- For path 1: custom OpenCV build with CUDA. For path 2: custom ffmpeg build.
+- NVIDIA GPU with NVDEC support (GeForce/Quadro Maxwell+, compute capability >= 5.0)
+- NVIDIA driver >= 550 on the host
+- NVIDIA Container Toolkit installed
 
-The Dockerfile does not include GPU decode support today. When you add a GPU,
-the recommended path is to create a `Dockerfile.gpu` variant that builds
-OpenCV with CUDA support and uses `cv2.cudacodec.createVideoReader`, with a
-runtime flag or config key (`"gpu_decode": true`) to switch `FrameGrabber`
-between CPU and GPU paths. This keeps the existing CPU-only image working on
-hardware without a GPU.
+**Ready to use:** `Dockerfile.gpu` and `docker-compose.gpu.yml` are provided.
+They use [cudawarped's pre-built OpenCV CUDA wheels](https://github.com/cudawarped/opencv-python-cuda-wheels)
+(includes `cv2.cudacodec` with NVDEC/NVCUVID) so no from-source build is needed.
+
+```bash
+# Install NVIDIA Container Toolkit (one-time, on host):
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+  sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+
+# Enable GPU decode in camera configs:
+# Add "gpu_decode": true to each camera's config.json
+
+# Build and run:
+docker compose -f docker-compose.gpu.yml build
+docker compose -f docker-compose.gpu.yml up -d
+```
+
+The standard `Dockerfile` / `docker-compose.yml` remain fully functional on
+hardware without a GPU — `FrameGrabber` automatically falls back to CPU
+decode if `cv2.cudacodec` isn't available, regardless of the `gpu_decode`
+config flag.
 
 ## Known limitations
 

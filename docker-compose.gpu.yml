@@ -1,0 +1,52 @@
+# GPU-accelerated variant of docker-compose.yml
+#
+# Uses Dockerfile.gpu (NVIDIA CUDA base + cudacodec-enabled OpenCV) and
+# passes the GPU device to the container for NVDEC hardware video decode.
+#
+# Prerequisites:
+#   - NVIDIA GPU installed with driver >= 550
+#   - NVIDIA Container Toolkit: nvidia-ctk runtime configure --runtime=docker
+#   - "gpu_decode": true in each camera's config.json
+#
+# Usage:
+#   docker compose -f docker-compose.gpu.yml build
+#   docker compose -f docker-compose.gpu.yml up -d
+#
+# This file only defines the dogwatch detector service. The notifier service
+# doesn't need GPU access — add it from docker-compose.yml if running both.
+
+services:
+  dogwatch:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    container_name: dogwatch
+    restart: unless-stopped
+
+    # Coral Edge TPU (PCIe M.2)
+    devices:
+      - /dev/apex_0:/dev/apex_0
+
+    # NVIDIA GPU access for NVDEC video decode
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, video]
+
+    environment:
+      OPENCV_FFMPEG_CAPTURE_OPTIONS: "rtsp_transport;tcp"
+      # NVIDIA runtime needs these to find the CUDA libs
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: video,compute,utility
+
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./config-rear-east.json:/app/config-rear-east.json:ro
+      - ./models:/app/models:ro
+      - ./clips:/app/clips
+      - ./clips-rear-east:/app/clips-rear-east
+      - ./debug_captures:/app/debug_captures
+      - ./data:/app/data

@@ -48,5 +48,6 @@
   "motion_gate_enabled": true,
   "motion_gate_threshold": 0.005,
   "motion_gate_pixel_threshold": 25,
-  "motion_gate_max_idle_seconds": 10
+  "motion_gate_max_idle_seconds": 10,
+  "gpu_decode": false
 }
