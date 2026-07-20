@@ -39,10 +39,20 @@ class FrameGrabber:
             print("[FrameGrabber] gpu_decode requested but cv2.cudacodec not available — falling back to CPU")
 
         if self._gpu_decode:
-            # cudacodec params for RTSP: use TCP transport
+            # cudacodec params for RTSP: TCP transport, BGR output
             params = cv2.cudacodec.VideoReaderInitParams()
             params.udpSource = False  # force TCP
             self._reader = cv2.cudacodec.createVideoReader(url, params=params)
+            # Request BGR output to avoid per-frame BGRA→BGR CPU conversion.
+            # This uses the set() API which is available in OpenCV >= 4.8.
+            try:
+                self._reader.set(cv2.cudacodec.COLOR_FORMAT_BGR)
+            except (AttributeError, TypeError, cv2.error):
+                try:
+                    # Alternative API form
+                    self._reader.setColorFormat(cv2.cudacodec.ColorFormat_BGR)
+                except (AttributeError, TypeError, cv2.error):
+                    pass  # fallback: BGRA→BGR conversion in loop
         else:
             self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
 
@@ -77,21 +87,19 @@ class FrameGrabber:
                 ok, gpu_mat = self._reader.nextFrame()
                 if not ok:
                     time.sleep(self.reconnect_delay)
-                    # Recreate the reader on stream drop
                     params = cv2.cudacodec.VideoReaderInitParams()
                     params.udpSource = False
                     self._reader = cv2.cudacodec.createVideoReader(self.url, params=params)
                     continue
-                # Download from GPU memory to CPU numpy array.
-                # cudacodec may return NV12/BGRA depending on codec — convert
-                # to BGR (what the rest of the pipeline expects).
+                # Convert color format on GPU before downloading to CPU.
+                # cudacodec typically outputs BGRA from NVDEC; converting on
+                # GPU avoids a 20MB/frame CPU memcpy+conversion per frame.
                 f = gpu_mat.download()
-                if len(f.shape) == 2 or (len(f.shape) == 3 and f.shape[2] == 1):
-                    # Grayscale or single-channel: unusual, just expand
+                if len(f.shape) == 3 and f.shape[2] == 4:
+                    # BGRA → BGR (drop alpha channel, pure numpy slice — cheap)
+                    f = f[:, :, :3].copy()
+                elif len(f.shape) == 2 or (len(f.shape) == 3 and f.shape[2] == 1):
                     f = cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
-                elif len(f.shape) == 3 and f.shape[2] == 4:
-                    # BGRA (common with NVDEC)
-                    f = cv2.cvtColor(f, cv2.COLOR_BGRA2BGR)
             except Exception:
                 time.sleep(self.reconnect_delay)
                 try:
