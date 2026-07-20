@@ -180,7 +180,7 @@ def vision_verify(image_path):
                 },
             ],
         }],
-        'max_tokens': 300,
+        'max_tokens': 1024,
         'response_format': {'type': 'json_object'},
     }
 
@@ -324,7 +324,7 @@ for p in pending:
     verdict = result['dog']
     digging = result['digging']
 
-    if verdict == 'DOG' or verdict == 'UNCERTAIN':
+    if verdict == 'DOG':
         dig_line = ''
         if digging is True:
             dig_line = '\n⚠️ *DIGGING detected* — dog appears to be digging!'
@@ -340,6 +340,11 @@ for p in pending:
         tg_send(
             f'❌ *False alarm* — the {event_label} at {p["time"]} '
             f'was just wind/leaves/shadow.'
+        )
+    elif verdict == 'UNCERTAIN':
+        tg_send(
+            f'❓ *Inconclusive* — vision could not confirm or deny the '
+            f'{event_label} at {p["time"]}. Check the snapshot manually.'
         )
 
     time.sleep(1)
