@@ -16,57 +16,50 @@
 #
 # Build:   docker compose -f docker-compose.gpu.yml build
 # Run:     docker compose -f docker-compose.gpu.yml up -d
-FROM nvidia/cuda:12.9.0-cudnn-runtime-ubuntu24.04
+#
+# Uses Ubuntu 22.04 (Jammy) base because the cudawarped OpenCV wheel links
+# against ffmpeg 4.x (libavcodec.so.58) which ships natively on Jammy.
+# Ubuntu 24.04 ships ffmpeg 6.x with incompatible ABI versioned symbols.
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
 
-# Avoid interactive prompts during apt
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System deps: Python 3.12, ffmpeg (still needed for snapshot pipeline),
-# and libraries OpenCV/CUDA need at runtime.
+# Python 3.12 from deadsnakes PPA (Jammy ships 3.10 by default)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
     python3.12 \
     python3.12-venv \
-    python3-pip \
+    python3.12-dev \
     ffmpeg \
     libgl1 \
     libglib2.0-0 \
     udev \
     usbutils \
     curl \
-    && rm -rf /var/lib/apt/lists/* \
-    # The cudawarped OpenCV wheel was built against ffmpeg 4.x (libavcodec.so.58)
-    # but Ubuntu 24.04 ships ffmpeg 6.x (libavcodec.so.60). Create compat symlinks
-    # for the libraries the wheel links against. The NVDEC decode path barely
-    # touches these (the GPU hardware does the actual decode), so this is safe.
-    && ln -sf /usr/lib/x86_64-linux-gnu/libavcodec.so.60 /usr/lib/x86_64-linux-gnu/libavcodec.so.58 \
-    && ln -sf /usr/lib/x86_64-linux-gnu/libavformat.so.60 /usr/lib/x86_64-linux-gnu/libavformat.so.58 \
-    && ln -sf /usr/lib/x86_64-linux-gnu/libavutil.so.58 /usr/lib/x86_64-linux-gnu/libavutil.so.56 \
-    && ln -sf /usr/lib/x86_64-linux-gnu/libswscale.so.7 /usr/lib/x86_64-linux-gnu/libswscale.so.5 \
-    && ln -sf /usr/lib/x86_64-linux-gnu/libswresample.so.4 /usr/lib/x86_64-linux-gnu/libswresample.so.3 \
-    && ldconfig
+    && rm -rf /var/lib/apt/lists/*
 
-# Make python3.12 the default python3/python
+# Make python3.12 the default and bootstrap pip
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
 
 # libedgetpu runtime (same community build as the CPU Dockerfile)
 ADD https://github.com/feranick/libedgetpu/releases/download/16.0TF2.19.1-1/libedgetpu1-std_16.0tf2.19.1-1.bookworm_amd64.deb \
     /tmp/libedgetpu.deb
 RUN dpkg -i /tmp/libedgetpu.deb || true \
-    && apt-get install -f -y \
-    && rm /tmp/libedgetpu.deb
+    && apt-get update && apt-get install -f -y \
+    && rm -rf /var/lib/apt/lists/* /tmp/libedgetpu.deb
 
 # Python dependencies.
-# Key difference vs standard Dockerfile: opencv-contrib-python from
-# cudawarped's pre-built CUDA wheels (includes cv2.cudacodec with NVDEC).
-# The wheel is hosted on GitHub releases — pip install directly from the URL.
-RUN pip install --no-cache-dir --break-system-packages \
+# opencv-contrib-python from cudawarped's CUDA wheels (NVDEC/NVCUVID support).
+RUN pip install --no-cache-dir \
     ai-edge-litert==2.1.6 \
     paho-mqtt==2.1.0 \
     numpy==2.5.1 \
     shapely==2.1.2 \
     requests==2.34.2 \
-    && pip install --no-cache-dir --break-system-packages \
     "https://github.com/cudawarped/opencv-python-cuda-wheels/releases/download/4.12.0.88/opencv_contrib_python-4.12.0.88-cp37-abi3-linux_x86_64.whl"
 
 COPY *.py /app/
