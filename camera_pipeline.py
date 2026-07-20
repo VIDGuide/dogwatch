@@ -21,6 +21,7 @@ from frame_grabber import FrameGrabber
 from motion_gate import MotionGate
 from mqtt_publisher import Publisher
 from snapshot_quality import is_image_bad
+from static_suppressor import StaticSuppressor
 from tracker import CentroidTracker
 
 
@@ -136,6 +137,12 @@ class CameraPipeline:
         # SQLite event log — replaces grepping container stdout for event
         # history. Shared db across all cameras (thread-safe).
         self.event_store = EventStore(cfg, camera_name=name)
+
+        # Static bbox suppression: if the same bbox region fires repeatedly
+        # at the same position without any spatial movement (no dog ever
+        # "arrived"), suppress it as a known static false-positive element.
+        # See static_suppressor.py for the full design rationale.
+        self.static_suppressor = StaticSuppressor(cfg)
 
     def _apply_crop(self, frame):
         if self.crop:
@@ -270,12 +277,32 @@ class CameraPipeline:
         tracks = self.tracker.update(
             [d["bbox"] for d in dets], t0, scores=[d["score"] for d in dets]
         )
+
+        # Inform the static suppressor about any tracks that moved significantly.
+        # This differentiates "a dog walked in" from "a structural element is
+        # always here". A track with centroid movement > 20px between updates
+        # is clearly not static.
+        for track in tracks:
+            if len(track.history) >= 2:
+                _, prev_centroid, _ = track.history[-2]
+                _, curr_centroid, _ = track.history[-1]
+                dx = abs(curr_centroid[0] - prev_centroid[0])
+                dy = abs(curr_centroid[1] - prev_centroid[1])
+                if dx + dy > 20:
+                    self.static_suppressor.record_movement(track.bbox, t0)
+
         events = self.monitor.evaluate(tracks, gray)
 
         # Annotate one snapshot per tick (first event only) so we don't spam.
         snapshot_sent = False
 
         for etype, tid, bbox, score in events:
+            # Static suppression: if this bbox has been firing repeatedly
+            # at the same position with no movement, it's a structural
+            # false positive (beam, railing, pipe). Suppress it.
+            if self.static_suppressor.should_suppress(bbox, t0):
+                continue
+
             payload = {
                 "track": tid,
                 "bbox": [int(v) for v in bbox],
