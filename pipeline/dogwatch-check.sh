@@ -180,7 +180,7 @@ def vision_verify(image_path):
                 },
             ],
         }],
-        'max_tokens': 40,
+        'max_tokens': 300,
         'response_format': {'type': 'json_object'},
     }
 
@@ -204,6 +204,14 @@ def vision_verify(image_path):
                     if isinstance(part, dict) and part.get('type') == 'text':
                         combined += part.get('text', '')
         combined = combined.strip()
+
+        # If the response was truncated (finish_reason: length) or empty,
+        # treat it as an API failure rather than defaulting to UNCERTAIN
+        # (which maps to "confirmed" and produces false confirmations).
+        if not combined or len(combined) < 5:
+            finish = result.get('choices', [{}])[0].get('finish_reason', '')
+            print(f'  vision_verify: truncated/empty response ({finish}): {combined!r}', file=sys.stderr)
+            return None
 
         dog = 'UNCERTAIN'
         digging = None
