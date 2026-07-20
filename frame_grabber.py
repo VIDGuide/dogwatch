@@ -82,8 +82,16 @@ class FrameGrabber:
                     params.udpSource = False
                     self._reader = cv2.cudacodec.createVideoReader(self.url, params=params)
                     continue
-                # Download from GPU memory to CPU numpy array
+                # Download from GPU memory to CPU numpy array.
+                # cudacodec may return NV12/BGRA depending on codec — convert
+                # to BGR (what the rest of the pipeline expects).
                 f = gpu_mat.download()
+                if len(f.shape) == 2 or (len(f.shape) == 3 and f.shape[2] == 1):
+                    # Grayscale or single-channel: unusual, just expand
+                    f = cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
+                elif len(f.shape) == 3 and f.shape[2] == 4:
+                    # BGRA (common with NVDEC)
+                    f = cv2.cvtColor(f, cv2.COLOR_BGRA2BGR)
             except Exception:
                 time.sleep(self.reconnect_delay)
                 try:
