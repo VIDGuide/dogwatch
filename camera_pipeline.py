@@ -282,7 +282,7 @@ class CameraPipeline:
         # This differentiates "a dog walked in" from "a structural element is
         # always here". A track with centroid movement > 20px between updates
         # is clearly not static.
-        for track in tracks:
+        for _, track in tracks.items():
             if len(track.history) >= 2:
                 _, prev_centroid, _ = track.history[-2]
                 _, curr_centroid, _ = track.history[-1]
