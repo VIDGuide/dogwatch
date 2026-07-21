@@ -50,7 +50,7 @@ services:
       # Notify config (camera URLs, chat_id) — gitignored, contains creds.
       - ./dogwatch-notify.config.json:/app/dogwatch-notify.config.json:ro
       # Secrets (Telegram bot token, vision API key)
-      - ~/.openclaw/secrets.json:/app/secrets.json:ro
+      - ~/.openclaw/secrets.json:/root/.openclaw/secrets.json:ro
       # Shared debug capture directory (notifier writes its annotated copies
       # here alongside the detector container's raw captures).
       - ./debug_captures:/app/debug_captures
