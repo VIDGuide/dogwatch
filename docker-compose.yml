@@ -9,6 +9,7 @@ services:
       - /dev/apex_0:/dev/apex_0
 
     environment:
+      TZ: "Australia/Sydney"
       # Force OpenCV + FFmpeg to use TCP transport for RTSP —
       # the `?rtsp_transport=tcp` URL param doesn't reliably work
       # with OpenCV's VideoCapture FFmpeg backend.
@@ -33,6 +34,7 @@ services:
     restart: unless-stopped
 
     environment:
+      TZ: "Australia/Sydney"
       MQTT_HOST: "172.17.0.1"
       MQTT_PORT: "1883"
       MQTT_TOPIC: "dogwatch"

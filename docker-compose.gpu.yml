@@ -37,6 +37,7 @@ services:
               capabilities: [gpu, video]
 
     environment:
+      TZ: "Australia/Sydney"
       OPENCV_FFMPEG_CAPTURE_OPTIONS: "rtsp_transport;tcp"
       # NVIDIA runtime needs these to find the CUDA libs
       NVIDIA_VISIBLE_DEVICES: all
