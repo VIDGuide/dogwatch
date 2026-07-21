@@ -38,21 +38,17 @@ Assistant via MQTT.
 
 2. **Download the model**
 
-   Model and labels come from Google's official [`google-coral/test_data`](https://github.com/google-coral/test_data)
-   repo:
+   Use the `download_models.sh` script to pull models from Google's
+   [`google-coral/test_data`](https://github.com/google-coral/test_data) repo:
    ```bash
-   mkdir -p models
-   curl -L -o models/efficientdet_lite3_512_ptq_edgetpu.tflite \
-     https://raw.githubusercontent.com/google-coral/test_data/master/efficientdet_lite3_512_ptq_edgetpu.tflite
-   curl -L -o models/coco_labels.txt \
-     https://raw.githubusercontent.com/google-coral/test_data/master/coco_labels.txt
+   ./download_models.sh efficientdet   # recommended: EfficientDet-Lite3 512×512 (~38 mAP)
+   ./download_models.sh mobilenet      # faster: SSD MobileNet V2 300×300
+   ./download_models.sh mobiledet      # middle ground: SSDLite MobileDet 320×320
+   ./download_models.sh all            # download all three + COCO labels
    ```
-   This is the stock COCO-trained EfficientDet-Lite3 model, already compiled
-   for the Edge TPU — no training or conversion needed. The input resolution
-   is **512×512** (vs 300×300 for the older MobileNet V2 models), giving
-   substantially better detection of small/distant dogs. It detects all 90
-   COCO classes; `detector.py` filters to just `dog` at runtime by looking
-   up the label id in `coco_labels.txt`.
+   This downloads a pre-compiled Edge-TPU model — no training or conversion
+   needed. The labels file (`coco_labels.txt`) is always downloaded alongside.
+   `detector.py` filters to just `dog` at runtime by looking up the label id.
 
    The model path is **config-driven**: `detector.py` reads the input shape
    from the model file at load time, so swapping to a different
