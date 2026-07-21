@@ -3,7 +3,7 @@
   "mqtt_host": "mqtt-broker-ip",
   "mqtt_port": 1883,
   "mqtt_base_topic": "dogwatch/rear-east",
-  "model_path": "models/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite",
+  "model_path": "models/efficientdet_lite3_512_ptq_edgetpu.tflite",
   "labels_path": "models/coco_labels.txt",
   "score_threshold": 0.4,
   "snapshot_url": "http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture",

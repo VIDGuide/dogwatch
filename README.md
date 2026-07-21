@@ -9,7 +9,7 @@ Assistant via MQTT.
 ## Features
 
 - **Multi-camera** — runs any number of cameras in a single container
-- **Coral TPU** — SSD MobileNet V2 on the Edge TPU for low-power inference
+- **Coral TPU** — EfficientDet-Lite3 on the Edge TPU (512×512 input) for low-power, high-accuracy inference
 - **Fence zone** — define a polygon per camera; dogs trigger only when their
   paws cross it
 - **Digging heuristic** — stationary bounding box + high intra-box pixel change
@@ -38,20 +38,29 @@ Assistant via MQTT.
 
 2. **Download the model**
 
-   Both files come from Google's official [`google-coral/test_data`](https://github.com/google-coral/test_data)
+   Model and labels come from Google's official [`google-coral/test_data`](https://github.com/google-coral/test_data)
    repo:
    ```bash
    mkdir -p models
-   curl -L -o models/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite \
-     https://raw.githubusercontent.com/google-coral/test_data/master/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite
+   curl -L -o models/efficientdet_lite3_512_ptq_edgetpu.tflite \
+     https://raw.githubusercontent.com/google-coral/test_data/master/efficientdet_lite3_512_ptq_edgetpu.tflite
    curl -L -o models/coco_labels.txt \
      https://raw.githubusercontent.com/google-coral/test_data/master/coco_labels.txt
    ```
-   This is the stock COCO-trained SSD MobileNet V2 model, already compiled
-   for the Edge TPU — no training or conversion needed. It detects all 90
+   This is the stock COCO-trained EfficientDet-Lite3 model, already compiled
+   for the Edge TPU — no training or conversion needed. The input resolution
+   is **512×512** (vs 300×300 for the older MobileNet V2 models), giving
+   substantially better detection of small/distant dogs. It detects all 90
    COCO classes; `detector.py` filters to just `dog` at runtime by looking
-   up the label id in `coco_labels.txt`, so nothing else needs to change if
-   you swap in a different (still Edge-TPU-compiled) SSD model later.
+   up the label id in `coco_labels.txt`.
+
+   The model path is **config-driven**: `detector.py` reads the input shape
+   from the model file at load time, so swapping to a different
+   Edge-TPU-compiled model (e.g. back to MobileNet V2, or a fine-tuned
+   variant) is just a config change — no code edits needed. Available
+   alternatives in the same repo include `ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite`
+   (300×300, faster, lower accuracy) and `ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite`
+   (320×320, QAT-trained, middle ground).
 
 3. **Run**
    ```bash
@@ -68,7 +77,7 @@ Each camera needs its own `config-<name>.json`. See `config.example.json` and
 | `rtsp_url` | RTSP stream URL |
 | `score_threshold` | Minimum detection confidence (0-1) required to fire an event. Default 0.4. Raise this if you're seeing false positives (fence posts, shadows, soil texture misidentified as a dog) — see "Known limitations" below for a documented example. Each event's `attributes` MQTT payload now includes the actual detection `score`, so you can check how confident a specific false positive was before deciding how far to raise this. |
 | `snapshot_url` | (Optional) HTTP snapshot URL for clean stills |
-| `crop_roi` | (Optional) `[x1, y1, x2, y2]` normalised 0-1 — zoom into part of frame. Strongly recommended if the camera's full field of view is much wider than the actual fence/zone area: the detection model's fixed 300x300 input resolution struggles with small/distant dogs in a wide uncropped frame — see `samples/README.md` for measured evidence. Not currently set for the fence `camera` config, which is the most likely cause of missed detections on that camera specifically. |
+| `crop_roi` | (Optional) `[x1, y1, x2, y2]` normalised 0-1 — zoom into part of frame. Strongly recommended if the camera's full field of view is much wider than the actual fence/zone area: the detection model's input resolution (512×512 for EfficientDet-Lite3, 300×300 for older models) can struggle with small/distant dogs in a wide uncropped frame — see `samples/README.md` for measured evidence. Not currently set for the fence `camera` config, which is the most likely cause of missed detections on that camera specifically. |
 | `fence_zone_norm` | Polygon vertices `[[x,y], ...]` normalised 0-1 |
 | `stationary_px` | Max centroid drift (px) to consider dog "stationary" |
 | `motion_energy_thresh` | Fraction of box pixels changing per frame (0-1) |
@@ -257,16 +266,13 @@ docker start dogwatch
 ```
 
 All 5 current samples are small/distant dogs in full uncropped frames — a
-known, pre-existing weakness of `ssd_mobilenet_v2`'s fixed 300x300 input
-resolution on small objects, confirmed via a direct A/B test against the
-pre-migration `pycoral`/`tflite_runtime` stack to have nothing to do with
-the `ai-edge-litert` migration (identical scores, identical bounding boxes,
-on both stacks). The script tracks each sample's baseline score and flags a
+known weakness of the older `ssd_mobilenet_v2`'s 300×300 input resolution
+on small objects, which motivated the switch to EfficientDet-Lite3 (512×512
+input). The script tracks each sample's baseline score and flags a
 *regression* (a meaningful drop from that baseline) rather than just
-treating "no detection" as a failure, since these samples were already at
-or near zero before any of this migration work started. See
-`samples/README.md` for the full writeup and the cropping-based mitigation
-(`crop_roi`) that actually helps with this class of small-object miss.
+treating "no detection" as a failure. See `samples/README.md` for the
+full writeup and the cropping-based mitigation (`crop_roi`) that also helps
+with small-object misses.
 
 ## Performance tuning
 
@@ -370,8 +376,8 @@ config flag.
   tensor resizing/padding, output tensor parsing for SSD-style detection
   models). No compiled bindings are involved on the Python side anymore;
   the only native component is `libedgetpu.so` itself.
-- **False positives on fence/ground geometry.** `ssd_mobilenet_v2` can
-  occasionally misidentify high-contrast vertical/horizontal lines (fence
+- **False positives on fence/ground geometry.** The model can occasionally
+  misidentify high-contrast vertical/horizontal lines (fence
   rails, retaining wall beams) plus shadows on dirt/soil as a dog,
   especially on a low-quality/heavily-compressed frame. Confirmed via a
   real event (verified independently with Gemini vision, which found no

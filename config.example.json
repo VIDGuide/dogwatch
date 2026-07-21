@@ -6,7 +6,7 @@
   "mqtt_username": "",
   "mqtt_password": "",
   "mqtt_tls": false,
-  "model_path": "models/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite",
+  "model_path": "models/efficientdet_lite3_512_ptq_edgetpu.tflite",
   "labels_path": "models/coco_labels.txt",
   "score_threshold": 0.4,
   "target_fps": 5,
