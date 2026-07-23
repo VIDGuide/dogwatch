@@ -10,6 +10,10 @@ services:
 
     environment:
       TZ: "Australia/Sydney"
+      # OpenCV 5.x log level.  FATAL suppresses WARN-level stream timeout
+      # messages that would otherwise flood docker logs (those accounted
+      # for ~99% of the log volume).  Real errors still come through.
+      OPENCV_LOG_LEVEL: "FATAL"
       # Force OpenCV + FFmpeg to use TCP transport for RTSP —
       # the `?rtsp_transport=tcp` URL param doesn't reliably work
       # with OpenCV's VideoCapture FFmpeg backend.
