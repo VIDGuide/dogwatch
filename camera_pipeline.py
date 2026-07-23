@@ -10,6 +10,24 @@ import threading
 import time
 
 import cv2
+
+# Suppress OpenCV WARN-level messages (stream timeouts, deprecated API usage,
+# etc.) that flood docker logs — real errors still come through at FATAL level.
+cv2.setLogLevel(3)  # LOG_LEVEL_FATAL
+
+# Suppress FFmpeg av_log warnings (bad cseq, PPS range, etc.) that are not
+# captured by OpenCV's log system.  We keep AV_LOG_ERROR and above so real
+# stream errors (auth failures, connection refused) are still visible.
+import ctypes
+import ctypes.util
+_lib = ctypes.util.find_library('avutil')
+if _lib is not None:
+    try:
+        _avutil = ctypes.CDLL(_lib)
+        _avutil.av_log_set_level(16)  # AV_LOG_ERROR
+    except Exception:
+        pass
+
 import numpy as np
 import requests
 from requests.auth import HTTPDigestAuth

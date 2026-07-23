@@ -302,10 +302,10 @@ tg_send(alert_text)
 for p in pending:
     if not p['snapshot']:
         tg_send(
-            f'⚠️ *No snapshot available* for {p["type"].replace("_", " ").title()} '
-            f'at {p["time"]} — vision verification skipped. The detection alert '
-            f'above is still valid; this means the snapshot JPEG wasn\'t received '
-            f'in time for the check (usually a brief timing gap on container restart).'
+            f'⏭️ *Snapshot skipped* for {p["type"].replace("_", " ").title()} '
+            f'at {p["time"]} — vision verification skipped because the event '
+            f'triggered within 25s of the last snapshot capture (debounce). '
+            f'The detection above is still valid.'
         )
         continue
 
