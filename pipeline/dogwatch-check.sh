@@ -301,12 +301,6 @@ tg_send(alert_text)
 # ---- Vision verify each event ----
 for p in pending:
     if not p['snapshot']:
-        tg_send(
-            f'⏭️ *Snapshot skipped* for {p["type"].replace("_", " ").title()} '
-            f'at {p["time"]} — vision verification skipped because the event '
-            f'triggered within 25s of the last snapshot capture (debounce). '
-            f'The detection above is still valid.'
-        )
         continue
 
     result = vision_verify(p['snapshot'])
