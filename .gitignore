@@ -37,3 +37,6 @@ notify_workspace/
 
 # Notifier config at repo root (deployed copy, contains creds)
 dogwatch-notify.config.json
+
+# Vision verify throttle state (runtime, regenerated)
+.vision_verify_state.json
