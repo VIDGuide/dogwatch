@@ -752,12 +752,13 @@ def on_message(client, userdata, msg):
                 _archive_debug_snapshot(camera, snap_path, slug, capture_ts)
                 _cleanup_tmp_snapshot_later(snap_path)
 
+                score_pct = f" {score:.0%}" if score else ""
                 if slug == "dog_at_fence":
-                    caption = f"🐕 Dog at fence ({camera}) @ {ts_str}"
+                    caption = f"🐕 Dog at fence ({camera}) @ {ts_str}{score_pct}"
                 elif slug == "digging":
-                    caption = f"🕳️ Dogs digging ({camera}) @ {ts_str}"
+                    caption = f"🕳️ Dogs digging ({camera}) @ {ts_str}{score_pct}"
                 else:
-                    caption = f"⚠️ Dog alert ({camera}) @ {ts_str}"
+                    caption = f"⚠️ Dog alert ({camera}) @ {ts_str}{score_pct}"
                 send_telegram_photo(snap_path, caption)
             else:
                 fallback = f"🐕 Alert: {slug} ({camera}) @ {ts_str}"
