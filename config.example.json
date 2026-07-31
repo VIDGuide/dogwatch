@@ -8,7 +8,7 @@
   "mqtt_tls": false,
   "model_path": "models/efficientdet_lite3_512_ptq_edgetpu.tflite",
   "labels_path": "models/coco_labels.txt",
-  "score_threshold": 0.4,
+  "score_threshold": 0.55,
   "target_fps": 5,
   "clip_dir": "clips",
   "fence_zone_norm": [
@@ -34,6 +34,7 @@
   "dig_sustain_seconds": 4.0,
   "dig_stationary_px": 50,
   "event_cooldown_seconds": 30,
+  "min_consecutive": 2,
   "off_delay_seconds": 180,
   "debug_capture_enabled": false,
   "debug_capture_dir": "debug_captures",

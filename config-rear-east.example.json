@@ -5,7 +5,7 @@
   "mqtt_base_topic": "dogwatch/rear-east",
   "model_path": "models/efficientdet_lite3_512_ptq_edgetpu.tflite",
   "labels_path": "models/coco_labels.txt",
-  "score_threshold": 0.4,
+  "score_threshold": 0.55,
   "snapshot_url": "http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture",
   "target_fps": 5,
   "clip_dir": "clips",

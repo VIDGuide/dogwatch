@@ -208,52 +208,51 @@ class CameraPipeline:
         print(f"[{self.name}] HTTP snapshot gave bad image after 3 attempts")
         return None
 
-    def _publish_snapshot_thread(self, etype, tid, bbox, capture_ts=None):
-        """Fetch snapshot, annotate, and publish (runs in background thread)."""
-        img = self._fetch_snapshot_image() if self.snapshot_url else None
+    def _publish_snapshot_thread(self, etype, tid, bbox, capture_ts=None, inference_frame=None):
+        """Annotate the inference frame with bbox and publish to MQTT.
 
-        if img is None:
-            if self.snapshot_url:
-                # HTTP snapshot returned bad quality after 3 retries.
-                # Wait for a clean frame from RTSP — the HEVC decoder
-                # may take a few frames to sync (a 1080p/HEVC stream
-                # typically recovers within 1-2 GOPs, ~1-2s). Poll the
-                # FrameGrabber (which keeps the latest frame) and skip
-                # decode-glitched grey frames.
-                good_frame = None
-                for _ in range(30):  # ~3s at 100ms per poll
-                    f = self.grab.read()
-                    if f is not None and not is_image_bad(f):
-                        good_frame = f
-                        break
-                    time.sleep(0.1)
-                frame = good_frame
-            else:
-                # No snapshot URL configured: use the RTSP frame directly.
-                frame = self.grab.read()
-            if frame is None:
-                return
-            roi = self._apply_crop(frame)
-            annotated = roi.copy()
+        Uses the exact frame that inference ran on (passed via inference_frame),
+        so the snapshot always matches what the detector actually evaluated.
+        Falls back to fetching a fresh frame when inference_frame is None
+        (legacy callers).
+        """
+        if inference_frame is not None:
+            annotated = inference_frame.copy()
         else:
-            # Crop the HTTP snapshot to match the detection ROI.
-            # Use normalized fractions so RTSP-vs-HTTP resolution mismatches
-            # (e.g. sub-stream vs full 4K) don't produce wrong regions.
-            if self.crop_norm:
-                snap_h, snap_w = img.shape[:2]
-                x1 = max(0, int(round(self.crop_norm[0] * snap_w)))
-                y1 = max(0, int(round(self.crop_norm[1] * snap_h)))
-                x2 = min(snap_w, int(round(self.crop_norm[2] * snap_w)))
-                y2 = min(snap_h, int(round(self.crop_norm[3] * snap_h)))
-                annotated = img[y1:y2, x1:x2].copy()
-            elif self.crop:
-                annotated = img[self.crop[1]:self.crop[3], self.crop[0]:self.crop[2]].copy()
-            else:
-                annotated = img.copy()
+            # Legacy fallback: fetch a fresh frame (may differ from what was
+            # analyzed — the root cause of false positives where a bounding
+            # box from one frame is drawn onto a later frame with no dog).
+            img = self._fetch_snapshot_image() if self.snapshot_url else None
 
-        # Draw bounding box and label.
-        # Ensure contiguous layout — HTTP snapshot decode can produce
-        # non-standard strides that OpenCV drawing chokes on.
+            if img is None:
+                if self.snapshot_url:
+                    good_frame = None
+                    for _ in range(30):
+                        f = self.grab.read()
+                        if f is not None and not is_image_bad(f):
+                            good_frame = f
+                            break
+                        time.sleep(0.1)
+                    frame = good_frame
+                else:
+                    frame = self.grab.read()
+                if frame is None:
+                    return
+                roi_fallback = self._apply_crop(frame)
+                annotated = roi_fallback.copy()
+            else:
+                if self.crop_norm:
+                    snap_h, snap_w = img.shape[:2]
+                    x1 = max(0, int(round(self.crop_norm[0] * snap_w)))
+                    y1 = max(0, int(round(self.crop_norm[1] * snap_h)))
+                    x2 = min(snap_w, int(round(self.crop_norm[2] * snap_w)))
+                    y2 = min(snap_h, int(round(self.crop_norm[3] * snap_h)))
+                    annotated = img[y1:y2, x1:x2].copy()
+                elif self.crop:
+                    annotated = img[self.crop[1]:self.crop[3], self.crop[0]:self.crop[2]].copy()
+                else:
+                    annotated = img.copy()
+
         annotated = np.ascontiguousarray(annotated)
         x1, y1, x2, y2 = [int(v) for v in bbox]
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 3)
@@ -355,7 +354,7 @@ class CameraPipeline:
                 snapshot_sent = True
                 threading.Thread(
                     target=self._publish_snapshot_thread,
-                    args=(etype, tid, bbox, t0),
+                    args=(etype, tid, bbox, t0, roi.copy()),
                     daemon=True,
                 ).start()
 
