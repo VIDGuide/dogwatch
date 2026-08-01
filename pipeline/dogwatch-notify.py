@@ -631,6 +631,114 @@ def capture_snapshot(camera_name: str) -> str:
 
 _last_on_ts: dict = {}  # debounce per camera — keyed by camera name
 
+# ---- Detector-published snapshot cache ----
+# The detector container publishes the EXACT frame that inference ran on
+# (annotated with the bbox) to {base}/snapshot, with its capture timestamp on
+# {base}/snapshot/ts. We already receive those messages on our `dogwatch/#`
+# subscription, so we capture them passively here (ts arrives just before the
+# JPEG, back-to-back) and use that frame for alerts instead of re-capturing a
+# fresh frame the dog may have moved from. Pure in-memory bookkeeping — no
+# broker reads inside the callback, so this cannot wedge the MQTT loop like
+# the removed reentrant-read approach (commits d4a1338/3320b16).
+_det_snapshot: dict = {}  # camera -> {"jpeg": bytes, "ts": float}
+_det_ts_seen: dict = {}   # camera -> (ts, wall_time) — consumed when jpeg arrives
+
+
+def _camera_from_snapshot_topic(topic: str):
+    """Return the camera name for a snapshot/ts topic, or None.
+
+    Topics look like:
+      {BASE}/snapshot            -> "camera"
+      {BASE}/snapshot/ts         -> "camera"
+      {BASE}/{camera}/snapshot   -> "rear-east"
+      {BASE}/{camera}/snapshot/ts-> "rear-east"
+    """
+    prefix = BASE_TOPIC + "/"
+    if not topic.startswith(prefix):
+        return None
+    rest = topic[len(prefix):]
+    if rest in ("snapshot", "snapshot/ts"):
+        return "camera"
+    if rest.endswith("/snapshot"):
+        return rest[: -len("/snapshot")]
+    if rest.endswith("/snapshot/ts"):
+        return rest[: -len("/snapshot/ts")]
+    return None
+
+
+def _handle_on_event(client, camera, slug, bbox, attr, entry, now):
+    """Send the Telegram alert for one ON event, preferring the detector's
+    exact inference-frame snapshot over a fresh re-capture.
+
+    The detector publishes the event first and the annotated snapshot (ts then
+    jpeg) immediately after, so we poll the passive cache briefly for a
+    snapshot whose capture ts matches this event's ts. If none arrives (or it
+    is stale/missing), fall back to the legacy fresh-capture + draw path.
+    """
+    event_ts = attr.get("ts", now) if attr else now
+    snap_path = ""
+    det = None
+
+    # Wait up to ~2s for the detector's annotated snapshot to arrive.
+    for _ in range(20):
+        cand = _det_snapshot.get(camera)
+        if cand is not None and cand["ts"] >= event_ts - 0.5:
+            det = cand
+            break
+        time.sleep(0.1)
+
+    if det is not None:
+        # Detector's exact inference frame, already annotated — use as-is.
+        snap_path = f"/tmp/dogwatch_snap_{camera}_{int(time.time())}.jpg"
+        try:
+            with open(snap_path, "wb") as f:
+                f.write(det["jpeg"])
+            print(f"  Using detector inference-frame snapshot for {camera} "
+                  f"(snap_ts={det['ts']:.3f} event_ts={event_ts:.3f} "
+                  f"delta={event_ts - det['ts']:+.3f}s)", flush=True)
+        except OSError as exc:
+            print(f"  Failed to write detector snapshot: {exc}", flush=True)
+            snap_path = ""
+    else:
+        print(f"  No matching detector snapshot for {camera} "
+              f"(event_ts={event_ts:.3f}) — falling back to fresh capture",
+              flush=True)
+        snap_path = capture_snapshot(camera)
+        if snap_path and bbox:
+            label = slug.replace("_", " ").title()
+            score = attr.get("score", 0.0) if attr else 0.0
+            draw_bbox_on_image(snap_path, bbox, camera, label, score)
+
+    ts_str = time.strftime("%H:%M:%S", time.localtime(now))
+    if snap_path:
+        entry["snapshot"] = snap_path
+        if det is None:
+            # Fallback path: republish to HA (detector snapshot unavailable).
+            publish_image_to_mqtt(client, snap_path, camera, event_ts)
+        else:
+            # Preferred path: detector already published the annotated frame
+            # to the HA camera topic; just schedule the clean-still reset.
+            _schedule_clear(client, camera)
+
+        _archive_debug_snapshot(camera, snap_path, slug, event_ts)
+        _cleanup_tmp_snapshot_later(snap_path)
+
+        score = attr.get("score", 0.0) if attr else 0.0
+        score_pct = f" {score:.0%}" if score else ""
+        if slug == "dog_at_fence":
+            caption = f"🐕 Dog at fence ({camera}) @ {ts_str}{score_pct}"
+        elif slug == "digging":
+            caption = f"🕳️ Dogs digging ({camera}) @ {ts_str}{score_pct}"
+        else:
+            caption = f"⚠️ Dog alert ({camera}) @ {ts_str}{score_pct}"
+        send_telegram_photo(snap_path, caption)
+    else:
+        fallback = f"🐕 Alert: {slug} ({camera}) @ {ts_str}"
+        send_telegram_text(fallback)
+
+    with open(STATUS_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     print(f"Connected to MQTT ({MQTT_HOST}:{MQTT_PORT}) reason_code={reason_code}")
@@ -672,6 +780,23 @@ def on_message(client, userdata, msg):
 
     topic = msg.topic
     raw = msg.payload.decode("utf-8", errors="replace")
+
+    # --- Passively capture the detector's annotated snapshot (ts then jpeg). ---
+    cam = _camera_from_snapshot_topic(topic)
+    if cam is not None:
+        if topic.endswith("/snapshot/ts"):
+            try:
+                _det_ts_seen[cam] = (float(raw), time.time())
+            except ValueError:
+                pass
+        elif topic.endswith("/snapshot"):
+            ts_info = _det_ts_seen.pop(cam, None)
+            if ts_info is not None and time.time() - ts_info[1] < 2.0:
+                _det_snapshot[cam] = {"jpeg": msg.payload, "ts": ts_info[0]}
+            # else: a periodic live still from ourselves (no ts pair) —
+            # ignore for the event cache so clean frames never overwrite
+            # the detector's annotated one.
+        return
 
     # --- Handle attributes topics (store latest bbox per camera+slug) ---
     if "/attributes" in topic:
@@ -726,47 +851,25 @@ def on_message(client, userdata, msg):
         if attr and attr.get("score"):
             entry["score"] = attr["score"]
 
-    # Grab snapshot for ON events
-    snap_path = ""
+    # Grab snapshot for ON events — deferred to a worker thread so we can
+    # prefer the detector's exact inference-frame snapshot (which arrives a
+    # few ms after the event message) without blocking the MQTT loop.
+    deferred = False
     if raw == "ON" and slug in ("dog_at_fence", "digging"):
         last_ts = _last_on_ts.get(camera, 0)
         if now - last_ts > 25:
-            snap_path = capture_snapshot(camera)
             _last_on_ts[camera] = now
-            if snap_path:
-                if bbox:
-                    label = slug.replace("_", " ").title()
-                    score = attr.get("score", 0.0) if attr else 0.0
-                    draw_bbox_on_image(snap_path, bbox, camera, label, score)
-
-                entry["snapshot"] = snap_path
-
-                # Publish annotated snapshot to HA via MQTT camera
-                capture_ts = attr.get("ts", now) if attr else now
-                publish_image_to_mqtt(client, snap_path, camera, capture_ts)
-
-                # Optional rolling archive for offline diagnosis (off by
-                # default) + always-on cleanup of the /tmp original (a real
-                # leak regardless of this setting — see
-                # _cleanup_tmp_snapshot_later's docstring).
-                _archive_debug_snapshot(camera, snap_path, slug, capture_ts)
-                _cleanup_tmp_snapshot_later(snap_path)
-
-                score_pct = f" {score:.0%}" if score else ""
-                if slug == "dog_at_fence":
-                    caption = f"🐕 Dog at fence ({camera}) @ {ts_str}{score_pct}"
-                elif slug == "digging":
-                    caption = f"🕳️ Dogs digging ({camera}) @ {ts_str}{score_pct}"
-                else:
-                    caption = f"⚠️ Dog alert ({camera}) @ {ts_str}{score_pct}"
-                send_telegram_photo(snap_path, caption)
-            else:
-                fallback = f"🐕 Alert: {slug} ({camera}) @ {ts_str}"
-                send_telegram_text(fallback)
+            threading.Thread(
+                target=_handle_on_event,
+                args=(client, camera, slug, bbox, attr, dict(entry), now),
+                daemon=True,
+            ).start()
+            deferred = True
 
     # Write event to status file for the cron-based backup pipeline
-    with open(STATUS_FILE, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    if not deferred:
+        with open(STATUS_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
 
 
 def main():
