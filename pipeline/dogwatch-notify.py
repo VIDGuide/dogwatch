@@ -99,12 +99,28 @@ CAMERAS = _CONFIG["cameras"]
 
 # ---- Secrets ----
 def _load_bot_token() -> str:
-    """Resolve the default Telegram bot token from the OpenClaw secrets file."""
+    """Resolve the dogwatch Telegram bot token.
+
+    Resolution order:
+      1. "botToken" in the notify config file (dogwatch-owned, gitignored —
+         the recommended home for the dedicated dogwatch bot token, fully
+         independent of OpenClaw's secrets file).
+      2. "dogwatch" account in the OpenClaw secrets file.
+      3. "default" account in the OpenClaw secrets file (legacy setups).
+      4. TELEGRAM_BOT_TOKEN env var.
+    """
+    token = str(_CONFIG.get("botToken", "")).strip()
+    if token:
+        return token
     secrets_path = os.path.expanduser("~/.openclaw/secrets.json")
     try:
         with open(secrets_path) as f:
             sec = json.load(f)
-        token = sec.get("channels", {}).get("telegram", {}).get("accounts", {}).get("default", {}).get("botToken", "")
+        accounts = sec.get("channels", {}).get("telegram", {}).get("accounts", {})
+        token = (
+            accounts.get("dogwatch", {}).get("botToken", "")
+            or accounts.get("default", {}).get("botToken", "")
+        )
         if token:
             return token
     except Exception as exc:

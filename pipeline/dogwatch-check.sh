@@ -21,6 +21,13 @@ CHAT_ID="${DOGWATCH_CHAT_ID:-}"
 if [ -z "$CHAT_ID" ] && [ -f "$NOTIFY_CONFIG" ]; then
   CHAT_ID=$(python3 -c "import json,sys; print(json.load(open('$NOTIFY_CONFIG')).get('chat_id',''))" 2>/dev/null)
 fi
+# Bot token is loaded from (in order): DOGWATCH_BOT_TOKEN env, the notify
+# config file's "botToken" (recommended — dogwatch-owned, gitignored), then
+# the "dogwatch"/"default" accounts in the OpenClaw secrets file.
+BOT_TOKEN="${DOGWATCH_BOT_TOKEN:-}"
+if [ -z "$BOT_TOKEN" ] && [ -f "$NOTIFY_CONFIG" ]; then
+  BOT_TOKEN=$(python3 -c "import json,sys; print(json.load(open('$NOTIFY_CONFIG')).get('botToken',''))" 2>/dev/null)
+fi
 
 # Vision model config — all overridable so any OpenAI-compatible vision
 # endpoint can be used instead of Gemini. Defaults point at Gemini's
@@ -46,6 +53,7 @@ export DW_CUTOFF="$CUTOFF"
 export DW_WORKSPACE_DIR="$WORKSPACE_SNAP_DIR"
 export DW_MARKER_FILE="$MARKER_FILE"
 export DW_SECRETS_FILE="$SECRETS_FILE"
+export DW_BOT_TOKEN="$BOT_TOKEN"
 export DW_CHAT_ID="$CHAT_ID"
 export DW_STATUS_FILE="$STATUS_FILE"
 export DW_VISION_API_URL="$VISION_API_URL"
@@ -69,10 +77,19 @@ VISION_API_KEY = os.environ.get('DW_VISION_API_KEY', '')
 try:
     with open(SECRETS_FILE) as f:
         secrets = json.load(f)
-    bot_token = secrets['channels']['telegram']['accounts']['default']['botToken']
 except (KeyError, FileNotFoundError) as e:
     print(f'ERROR: cannot load secrets: {e}', file=sys.stderr)
     sys.exit(1)
+
+# Bot token resolution order:
+#   1. DW_BOT_TOKEN env (from notify config "botToken" — dogwatch-owned,
+#      gitignored, fully independent of OpenClaw's secrets file)
+#   2. "dogwatch" account in the OpenClaw secrets file
+#   3. legacy "default" account
+bot_token = os.environ.get('DW_BOT_TOKEN', '') or ''
+if not bot_token:
+    accounts = secrets['channels']['telegram']['accounts']
+    bot_token = accounts.get('dogwatch', {}).get('botToken') or accounts['default']['botToken']
 
 # Vision API key: prefer the explicit DOGWATCH_VISION_API_KEY env var (works
 # for any provider). Falls back to secrets.json's "google" provider key for
