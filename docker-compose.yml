@@ -43,10 +43,15 @@ services:
       MQTT_PORT: "1883"
       MQTT_TOPIC: "dogwatch"
       # Vision verification (defaults to Gemini free tier via OpenAI-compat
-      # endpoint). Override for a different provider.
+      # endpoint). Override for a different provider. If the primary fails
+      # (e.g. Gemini 429 quota), the check script automatically falls back to
+      # OpenRouter (key from secrets.json "openrouter" provider by default).
       # DOGWATCH_VISION_API_URL: ""
       # DOGWATCH_VISION_MODEL: ""
       # DOGWATCH_VISION_API_KEY: ""
+      # DOGWATCH_VISION_FALLBACK_API_URL: ""
+      # DOGWATCH_VISION_FALLBACK_MODEL: ""
+      # DOGWATCH_VISION_FALLBACK_API_KEY: ""
       # Debug capture (notifier-side annotated snapshots)
       # DOGWATCH_DEBUG_CAPTURE: "true"
       # DOGWATCH_DEBUG_CAPTURE_DIR: "/app/debug_captures"

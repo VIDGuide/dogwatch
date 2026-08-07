@@ -41,6 +41,18 @@ VISION_API_URL="${DOGWATCH_VISION_API_URL:-https://generativelanguage.googleapis
 VISION_MODEL="${DOGWATCH_VISION_MODEL:-gemini-3-flash-preview}"
 VISION_API_KEY="${DOGWATCH_VISION_API_KEY:-}"
 
+# Fallback vision provider (OpenRouter by default) — used automatically when
+# the primary endpoint fails (Gemini quota/429, network, timeout, etc.).
+# Any OpenAI-compatible provider works; override via
+#   DOGWATCH_VISION_FALLBACK_API_URL / DOGWATCH_VISION_FALLBACK_MODEL /
+#   DOGWATCH_VISION_FALLBACK_API_KEY
+# The key falls back to the "openrouter" provider in secrets.json when unset.
+# Default model is the same Gemini family via OpenRouter — separate quota
+# from the direct Gemini endpoint, so a Gemini 429 no longer kills checks.
+VISION_FALLBACK_API_URL="${DOGWATCH_VISION_FALLBACK_API_URL:-https://openrouter.ai/api/v1/chat/completions}"
+VISION_FALLBACK_MODEL="${DOGWATCH_VISION_FALLBACK_MODEL:-google/gemini-3-flash-preview}"
+VISION_FALLBACK_API_KEY="${DOGWATCH_VISION_FALLBACK_API_KEY:-}"
+
 mkdir -p "$WORKSPACE_SNAP_DIR"
 rm -f "$MARKER_FILE"
 
@@ -59,6 +71,9 @@ export DW_STATUS_FILE="$STATUS_FILE"
 export DW_VISION_API_URL="$VISION_API_URL"
 export DW_VISION_MODEL="$VISION_MODEL"
 export DW_VISION_API_KEY="$VISION_API_KEY"
+export DW_VISION_FALLBACK_API_URL="$VISION_FALLBACK_API_URL"
+export DW_VISION_FALLBACK_MODEL="$VISION_FALLBACK_MODEL"
+export DW_VISION_FALLBACK_API_KEY="$VISION_FALLBACK_API_KEY"
 
 python3 << 'PYEOF'
 import json, time, sys, shutil, os, urllib.request, urllib.parse, base64
@@ -72,6 +87,9 @@ STATUS_FILE = os.environ['DW_STATUS_FILE']
 VISION_API_URL = os.environ['DW_VISION_API_URL']
 VISION_MODEL = os.environ['DW_VISION_MODEL']
 VISION_API_KEY = os.environ.get('DW_VISION_API_KEY', '')
+VISION_FALLBACK_API_URL = os.environ['DW_VISION_FALLBACK_API_URL']
+VISION_FALLBACK_MODEL = os.environ['DW_VISION_FALLBACK_MODEL']
+VISION_FALLBACK_API_KEY = os.environ.get('DW_VISION_FALLBACK_API_KEY', '')
 
 # ---- Load secrets ----
 try:
@@ -98,6 +116,12 @@ if not bot_token:
 if not VISION_API_KEY:
     try:
         VISION_API_KEY = secrets['models']['providers']['google']['apiKey']
+    except KeyError:
+        pass
+
+if not VISION_FALLBACK_API_KEY:
+    try:
+        VISION_FALLBACK_API_KEY = secrets['models']['providers']['openrouter']['apiKey']
     except KeyError:
         pass
 
@@ -150,23 +174,19 @@ def tg_send_photo(photo_path, caption):
     except Exception:
         return False
 
-def vision_verify(image_path):
-    """Call a vision model to assess (a) dog presence and (b) whether it is digging.
+def vision_verify_with(image_path, api_url, model, api_key, provider_label):
+    """Call one OpenAI-compatible vision endpoint to assess (a) dog presence
+    and (b) whether it is digging.
 
-    Uses the OpenAI-compatible chat completions format (model-agnostic — see
-    VISION_API_URL/VISION_MODEL/VISION_API_KEY above), so any provider that
-    speaks this API (Gemini, OpenAI, a local vLLM/Ollama server, etc.) can be
-    swapped in without code changes. Defaults to Google Gemini's
-    OpenAI-compatible endpoint (https://ai.google.dev/gemini-api/docs/openai),
-    which has a generous free tier for this usage pattern.
+    provider_label is used in log lines (e.g. 'primary' / 'fallback').
 
     Returns a dict {'dog': 'DOG'|'NO_DOG'|'UNCERTAIN', 'digging': bool|None}
-    or None on error."""
+    or None on error (API failure, rate limit, bad/truncated response)."""
     try:
         with open(image_path, 'rb') as f:
             b64 = base64.b64encode(f.read()).decode()
     except OSError as e:
-        print(f'  vision_verify: cannot read {image_path}: {e}', file=sys.stderr)
+        print(f'  vision_verify[{provider_label}]: cannot read {image_path}: {e}', file=sys.stderr)
         return None
 
     prompt_text = (
@@ -186,7 +206,7 @@ def vision_verify(image_path):
     )
 
     payload = {
-        'model': VISION_MODEL,
+        'model': model,
         'messages': [{
             'role': 'user',
             'content': [
@@ -202,9 +222,12 @@ def vision_verify(image_path):
     }
 
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(VISION_API_URL, data=data, method='POST')
+    req = urllib.request.Request(api_url, data=data, method='POST')
     req.add_header('Content-Type', 'application/json')
-    req.add_header('Authorization', f'Bearer {VISION_API_KEY}')
+    req.add_header('Authorization', f'Bearer {api_key}')
+    if 'openrouter.ai' in api_url:
+        req.add_header('HTTP-Referer', 'https://github.com/VIDGuide/dogwatch')
+        req.add_header('X-Title', 'DogWatch')
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read())
@@ -227,7 +250,7 @@ def vision_verify(image_path):
         # (which maps to "confirmed" and produces false confirmations).
         if not combined or len(combined) < 5:
             finish = result.get('choices', [{}])[0].get('finish_reason', '')
-            print(f'  vision_verify: truncated/empty response ({finish}): {combined!r}', file=sys.stderr)
+            print(f'  vision_verify[{provider_label}]: truncated/empty response ({finish}): {combined!r}', file=sys.stderr)
             return None
 
         dog = 'UNCERTAIN'
@@ -249,14 +272,38 @@ def vision_verify(image_path):
                 digging = True
             elif '"DIGGING": "NO"' in up or 'DIGGING: NO' in up:
                 digging = False
-            print(f'  vision_verify: non-JSON response: {combined}', file=sys.stderr)
+            print(f'  vision_verify[{provider_label}]: non-JSON response: {combined}', file=sys.stderr)
 
         if dog not in ('DOG', 'NO_DOG', 'UNCERTAIN'):
             dog = 'UNCERTAIN'
+        print(f'  vision_verify[{provider_label}] OK: dog={dog} digging={digging}', file=sys.stderr)
         return {'dog': dog, 'digging': digging}
     except Exception as e:
-        print(f'  vision_verify API error: {e}', file=sys.stderr)
+        print(f'  vision_verify[{provider_label}] API error: {e}', file=sys.stderr)
         return None
+
+
+def vision_verify(image_path):
+    """Verify a snapshot — primary provider first, OpenRouter fallback if the
+    primary fails (Gemini quota/429, network, timeout, bad response). Returns
+    the first successful result, or None if every configured provider fails."""
+    result = vision_verify_with(
+        image_path, VISION_API_URL, VISION_MODEL, VISION_API_KEY, 'primary'
+    )
+    if result is not None:
+        return result
+    if VISION_FALLBACK_API_KEY:
+        print(
+            f'  vision_verify: primary failed → trying fallback '
+            f'({VISION_FALLBACK_MODEL} @ {VISION_FALLBACK_API_URL})',
+            file=sys.stderr,
+        )
+        return vision_verify_with(
+            image_path, VISION_FALLBACK_API_URL, VISION_FALLBACK_MODEL,
+            VISION_FALLBACK_API_KEY, 'fallback',
+        )
+    print('  vision_verify: primary failed and no fallback key configured', file=sys.stderr)
+    return None
 
 # ---- Collect events ----
 pending = []
