@@ -53,6 +53,13 @@ VISION_FALLBACK_API_URL="${DOGWATCH_VISION_FALLBACK_API_URL:-https://openrouter.
 VISION_FALLBACK_MODEL="${DOGWATCH_VISION_FALLBACK_MODEL:-google/gemini-3-flash-preview}"
 VISION_FALLBACK_API_KEY="${DOGWATCH_VISION_FALLBACK_API_KEY:-}"
 
+# Optional dog-alarm hook — sounded by this script after vision verification
+# confirms digging. The alarm script has its own guard rails (time window,
+# replay interval, enabled flag), so this stays a dumb fire-and-forget call.
+ALARM_SCRIPT="${DOGWATCH_ALARM_SCRIPT:-/app/dog-alarm.sh}"
+
+export DW_ALARM_SCRIPT="$ALARM_SCRIPT"
+
 mkdir -p "$WORKSPACE_SNAP_DIR"
 rm -f "$MARKER_FILE"
 
@@ -76,7 +83,7 @@ export DW_VISION_FALLBACK_MODEL="$VISION_FALLBACK_MODEL"
 export DW_VISION_FALLBACK_API_KEY="$VISION_FALLBACK_API_KEY"
 
 python3 << 'PYEOF'
-import json, time, sys, shutil, os, urllib.request, urllib.parse, base64
+import json, time, sys, shutil, os, subprocess, urllib.request, urllib.parse, base64
 
 CUTOFF = float(os.environ['DW_CUTOFF'])
 WORKSPACE_DIR = os.environ['DW_WORKSPACE_DIR']
@@ -400,6 +407,17 @@ for p in pending:
             f'{dig_line}'
         )
         tg_send_photo(p['snapshot'], caption)
+
+        # Optional siren hook: vision has now CONFIRMED a dog AND that it is
+        # digging — the one case Michael wants the backyard alarm for. The
+        # dog-alarm script enforces its own guards (time window, replay
+        # interval, enabled flag) and raises the event back to the chat.
+        if digging is True and os.path.exists(os.environ.get('DW_ALARM_SCRIPT', '')):
+            reason = f'vision confirmed digging — {event_label} at {p["time"]}'
+            try:
+                subprocess.run([os.environ['DW_ALARM_SCRIPT'], reason], timeout=60)
+            except Exception as e:
+                print(f'  dog-alarm hook error: {e}', file=sys.stderr)
     elif verdict == 'NO_DOG':
         tg_send(
             f'❌ *False alarm* — the {event_label} at {p["time"]} '

@@ -6,18 +6,32 @@
       "detect_w": 640,
       "detect_h": 480
     },
-    "_comment_camera": "detect_w/detect_h/crop_roi here MUST always match this camera's crop_roi and rtsp_url resolution in the container's own config.json. If config.json's crop_roi or stream resolution changes, update this entry too — see README 'Keeping the notifier in sync'.",
+    "_comment_camera": "detect_w/detect_h/crop_roi here MUST always match this camera's crop_roi and rtsp_url resolution in the container's own config.json. If config.json's crop_roi or stream resolution changes, update this entry too \u2014 see README 'Keeping the notifier in sync'.",
     "rear-east": {
       "snapshot_url": "http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture",
       "snapshot_rtsp_fallback": "rtsp://user:pass@nvr-ip:554/Streaming/Channels/1201",
       "detect_w": 864,
       "detect_h": 727,
       "crop_roi": [
-        0.70,
-        0.10,
+        0.7,
+        0.1,
         1.0,
         0.55
       ]
     }
+  },
+  "alarm": {
+    "_comment_alarm": "OPTIONAL Dog Alarm siren via Home Assistant (see README 'Dog Alarm (Home Assistant)'). Omit this section or set enabled=false to disable the whole feature. Triggered automatically only after vision confirmation of digging; also triggerable manually via: dog-alarm.sh --manual '<reason>'. Guard rails: never sounds outside window_start\u2013window_end (local time), at most one sound per min_interval_sec (state persisted in state_file). Every sound sends a Telegram event to chat_id.",
+    "enabled": false,
+    "ha_url": "http://localhost:8123",
+    "ha_token": "",
+    "_comment_ha_token": "Long-lived access token (HA UI \u2192 Profile \u2192 Security \u2192 Long-lived access tokens). Either ha_token OR ha_refresh_token is required.",
+    "ha_refresh_token": "",
+    "entity_id": "siren.dog_alarm",
+    "window_start": "07:00",
+    "window_end": "20:00",
+    "min_interval_sec": 60,
+    "state_file": "/app/workspace/dog-alarm.state",
+    "notify_chat": true
   }
 }

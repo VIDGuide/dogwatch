@@ -221,6 +221,63 @@ unset, the script falls back to `models.providers.google.apiKey` in
 `~/.openclaw/secrets.json` for backwards compatibility with existing
 Gemini-only setups.
 
+### Dog Alarm (optional — siren via Home Assistant)
+
+An optional add-on that sounds a Home Assistant **siren** (e.g. a Tuya
+"Dog Alarm" in the back yard) to break the dogs' attention when they dig.
+It is completely optional: if the `alarm` section is absent from
+`dogwatch-notify.config.json` (or `enabled` is `false`), nothing ever
+happens — no code path runs, no errors, no noise.
+
+**What triggers it**
+
+* **Automatic** — only after vision verification **confirms digging**
+  (`dogwatch-check.sh` already verifies every event; when the model says
+  `digging: YES` it fires the alarm). A plain "dog detected" is never
+  enough on its own.
+* **Manual** — any chat/agent can ask for it:
+  ```bash
+  docker exec dogwatch-notify /app/dog-alarm.sh --manual "reason here"
+  ```
+
+**Guard rails (all enforced inside `pipeline/dog-alarm.sh`)**
+
+| Guard | Default | Notes |
+|-------|---------|-------|
+| Time window | `07:00`–`20:00` local | The alarm can **never** sound outside this window. The window may wrap midnight (`22:00`–`06:00`) if you set start > end. |
+| Replay guard | `min_interval_sec: 60` | At most one sound per interval, tracked via a persistent `state_file` (survives container restarts). |
+| Config gate | `enabled: false` | Silent exit (code 3) when unconfigured. |
+
+Every time the alarm actually sounds, a Telegram message is raised back to
+the configured chat (🔔 Dog Alarm sounded — reason + time). Blocked
+*manual* attempts also message (🔕 with the reason it was blocked, e.g.
+outside hours); blocked automatic attempts only log.
+
+**Configuration** (`alarm` section of `dogwatch-notify.config.json`):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Master switch for the whole feature. |
+| `ha_url` | `http://localhost:8123` | Home Assistant base URL. From the notifier container use `http://172.17.0.1:8123` (docker bridge gateway). |
+| `ha_token` | `""` | HA long-lived access token (Bearer). Recommended: HA UI → Profile → Security → Long-lived access tokens. Either `ha_token` *or* `ha_refresh_token` is required. |
+| `ha_refresh_token` | `""` | HA refresh token — exchanged for a short-lived access token on every run (`POST /auth/token`). Use when long-lived tokens are unavailable/revoked in your instance. |
+| `entity_id` | `siren.dog_alarm` | HA entity to turn on (`siren.turn_on`). The siren's own duration/volume entities (e.g. Tuya `number.*_alarm_time`, `select.*_alarm_volume`) control how long it plays — the script just fires it once. |
+| `window_start` / `window_end` | `07:00` / `20:00` | Local-time window (HH:MM, 24h) during which the alarm may sound. |
+| `min_interval_sec` | `60` | Minimum seconds between sounds (replay guard). |
+| `state_file` | next to config | Persistent file storing the last-sounded epoch. In the container point this at a mounted volume, e.g. `/app/workspace/dog-alarm.state`. |
+| `notify_chat` | `true` | Send the Telegram event (sounded / manual-blocked / failure) to `chat_id`. |
+
+All keys can be overridden per-run with env vars: `DOGWATCH_HA_URL`,
+`DOGWATCH_HA_TOKEN`, `DOGWATCH_HA_REFRESH_TOKEN`, `DOGWATCH_ALARM_ENTITY`,
+`DOGWATCH_ALARM_WINDOW_START`, `DOGWATCH_ALARM_WINDOW_END`,
+`DOGWATCH_ALARM_MIN_INTERVAL`, `DOGWATCH_ALARM_STATE_FILE`.
+
+Exit codes: `0` sounded · `2` blocked (outside window) · `3` disabled ·
+`4` replay guard · `5` error (config/HA).
+
+See `pipeline/dogwatch-notify.config.example.json` for a fully commented
+template.
+
 ## Development
 
 Unit tests cover `tracker.py`, `behavior.py`, and `snapshot_quality.py` (the
