@@ -553,7 +553,13 @@ def mode_montage(cfg, chat_id, bot_token, fd, nvr):
 
 
 def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=None):
-    """Grab + vision-verify each in-scope channel, report with photos."""
+    """Grab + vision-verify each in-scope channel, report with photos.
+
+    Exits early once find_dogs.max_found cameras have a dog (default 1 —
+    there are at most 2 dogs and they're nearly always together, so the
+    first camera that has one is enough). Remaining cameras are skipped
+    and the summary notes the early stop.
+    """
     names = resolve_names(fd, nvr)
     if not channel_ids:
         channel_ids = fd.get('channels', [])
@@ -561,10 +567,20 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
         print('ERROR: no channels to scan (config find_dogs.channels or CLI)',
               file=sys.stderr)
         return 1
+    try:
+        max_found = int(fd.get('max_found', 1) or 1)
+    except (TypeError, ValueError):
+        max_found = 1
 
     found, clear, uncertain, failed = [], [], [], []
+    scanned = 0
+    early_exit = False
     with tempfile.TemporaryDirectory() as td:
         for ch in channel_ids:
+            if len(found) >= max_found:
+                early_exit = True
+                break
+            scanned += 1
             name = names.get(ch, f'Channel {ch}')
             p = os.path.join(td, f'ch{ch}.jpg')
             if not grab_frame(ch, nvr, p):
@@ -578,7 +594,9 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
             else:
                 uncertain.append((ch, name))
 
-        lines = [f'🔍 Find the dogs — {len(channel_ids)} cameras scanned']
+        lines = [f'🔍 Find the dogs — {scanned} cameras scanned']
+        if early_exit:
+            lines.append('⏩ Stopped early: dogs found')
         for ch, name, p, activity in found:
             line = f'🐕 {name} (ch{ch})'
             if activity:
