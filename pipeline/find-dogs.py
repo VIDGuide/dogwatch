@@ -426,7 +426,7 @@ def mode_montage(cfg, chat_id, bot_token, fd, nvr):
     return 0 if ok else 1
 
 
-def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys):
+def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=None):
     """Grab + vision-verify each in-scope channel, report with photos."""
     names = resolve_names(fd, nvr)
     if not channel_ids:
@@ -469,6 +469,33 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys):
         ok = tg_send(bot_token, chat_id, '\n'.join(lines))
         print('summary sent:', ok)
 
+        # Plain-text voice summary for the Alexa/HA announce path.
+        voice = []
+        if found:
+            voice.append('Found the dogs at '
+                         + ', '.join(n for _, n, _ in found) + '.')
+        if uncertain:
+            voice.append('Not sure at '
+                         + ', '.join(n for _, n in uncertain) + '.')
+        if clear:
+            voice.append('No dogs at '
+                         + ', '.join(n for _, n in clear) + '.')
+        if failed:
+            voice.append('No signal from '
+                         + ', '.join(n for _, n in failed) + '.')
+        if not found and not uncertain:
+            voice.append('No dogs found.')
+        voice_summary = ' '.join(voice) or 'Find the dogs scan completed.'
+        if summary_file:
+            try:
+                with open(summary_file, 'w') as f:
+                    f.write(voice_summary)
+                print(f'summary written: {summary_file}')
+            except OSError as e:
+                print(f'ERROR: cannot write summary file {summary_file}: {e}',
+                      file=sys.stderr)
+        print('voice summary:', voice_summary)
+
         for ch, name, p in found:
             okp = tg_send_photo(bot_token, chat_id, p,
                                 f'🐕 {name} (ch{ch})')
@@ -490,15 +517,21 @@ def main():
         return 1
 
     channel_ids = []
-    if len(args) > 1:
-        for part in args[1].split(','):
+    summary_file = None
+    rest = args[1:]
+    if rest and rest[0] == '--summary-file' and len(rest) > 1:
+        summary_file = rest[1]
+        rest = rest[2:]
+    if rest:
+        for part in rest[0].split(','):
             try:
                 channel_ids.append(int(part.strip()))
             except ValueError:
                 print(f'ERROR: bad channel id {part!r}', file=sys.stderr)
                 return 1
     keys = load_vision_keys()
-    return mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys)
+    return mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys,
+                     summary_file=summary_file)
 
 
 if __name__ == '__main__':
