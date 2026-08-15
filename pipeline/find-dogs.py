@@ -260,10 +260,14 @@ PROMPT = (
     'dogs may be small, far from the camera, partly hidden, or in shadow.\n'
     'Consider motion blur, lighting, and common false positives (leaves, '
     'shadows, garden ornaments, cats, people).\n'
+    'If a dog is present, also describe its activity in a short phrase.\n'
     'Respond with STRICT JSON only, no prose, in exactly this form:\n'
-    '{"dog": "YES"|"NO"|"UNCERTAIN"}\n'
+    '{"dog": "YES"|"NO"|"UNCERTAIN", "activity": "short phrase"}\n'
     'dog = YES if a dog is clearly or very likely present, NO if definitely '
-    'not, UNCERTAIN if you cannot tell.'
+    'not, UNCERTAIN if you cannot tell.\n'
+    'activity = 2-5 words describing what the dog(s) are doing (e.g. "sleeping", '
+    '"running around", "barking at the fence", "lying in the sun") when dog is '
+    'YES; empty string when dog is NO or UNCERTAIN.'
 )
 
 
@@ -274,7 +278,7 @@ def vision_verify_with(image_path, api_url, model, api_key, label):
     except OSError as e:
         print(f'  vision[{label}] cannot read {image_path}: {e}',
               file=sys.stderr)
-        return None
+        return None, ''
 
     payload = {
         'model': model,
@@ -300,7 +304,7 @@ def vision_verify_with(image_path, api_url, model, api_key, label):
         result = r.json()
     except Exception as e:
         print(f'  vision[{label}] API error: {e}', file=sys.stderr)
-        return None
+        return None, ''
 
     combined = ''
     for choice in result.get('choices', []):
@@ -315,11 +319,14 @@ def vision_verify_with(image_path, api_url, model, api_key, label):
     if not combined or len(combined) < 5:
         print(f'  vision[{label}] truncated/empty response: {combined!r}',
               file=sys.stderr)
-        return None
+        return None, ''
 
     dog = 'UNCERTAIN'
+    activity = ''
     try:
-        dog = str(json.loads(combined).get('dog', 'UNCERTAIN')).upper()
+        parsed = json.loads(combined)
+        dog = str(parsed.get('dog', 'UNCERTAIN')).upper()
+        activity = str(parsed.get('activity', '') or '').strip()
     except json.JSONDecodeError:
         up = combined.upper()
         for kw in ('YES', 'NO', 'UNCERTAIN'):
@@ -330,17 +337,84 @@ def vision_verify_with(image_path, api_url, model, api_key, label):
               file=sys.stderr)
     if dog not in ('YES', 'NO', 'UNCERTAIN'):
         dog = 'UNCERTAIN'
-    print(f'  vision[{label}] OK: dog={dog}', file=sys.stderr)
-    return dog
+    print(f'  vision[{label}] OK: dog={dog} activity={activity!r}',
+          file=sys.stderr)
+    return dog, activity
 
 
 def vision_verify(image_path, keys):
     api_url, model, api_key, fb_url, fb_model, fb_key = keys
-    dog = vision_verify_with(image_path, api_url, model, api_key, 'primary')
+    dog, activity = vision_verify_with(image_path, api_url, model, api_key,
+                                       'primary')
     if dog is None:
-        dog = vision_verify_with(image_path, fb_url, fb_model, fb_key,
-                                 'fallback')
-    return dog
+        dog, activity = vision_verify_with(image_path, fb_url, fb_model,
+                                           fb_key, 'fallback')
+    return dog, activity
+
+
+def compose_voice_line(spots, keys):
+    """DeepSeek composes a varied, natural one-liner for the Alexa announce.
+
+    spots = [(voice_name, activity), ...] — e.g. [('Back Door', 'sleeping')].
+    Returns the composed sentence, or '' if the call fails (caller falls
+    back to the deterministic template). Env overrides:
+    DOGWATCH_VOICE_API_URL/_MODEL/_API_KEY (default: deepseek provider).
+    """
+    api_url = os.environ.get(
+        'DOGWATCH_VOICE_API_URL',
+        'https://api.deepseek.com/v1/chat/completions')
+    model = os.environ.get('DOGWATCH_VOICE_MODEL', 'deepseek-chat')
+    api_key = os.environ.get('DOGWATCH_VOICE_API_KEY', '')
+    try:
+        with open(SECRETS_FILE) as f:
+            secrets = json.load(f)
+        if not api_key:
+            api_key = (secrets.get('models', {}).get('providers', {})
+                       .get('deepseek', {}).get('apiKey', ''))
+    except Exception:
+        pass
+    if not api_key:
+        print('  voice[deepseek] no API key — using template',
+              file=sys.stderr)
+        return ''
+
+    loc = ', '.join(f'{n} ({a})' if a else n for n, a in spots)
+    prompt = (
+        'Write ONE short, warm, natural sentence telling the owner where '
+        'their dogs are and what they are doing. Speak plainly, like a '
+        'helpful assistant — no emojis, no markdown, no quotes, no '
+        'introductory words. Vary the phrasing and structure each time; '
+        'do not always start with "Found". Keep it under 14 words.\n'
+        f'Dogs found: {loc}.'
+    )
+    payload = {
+        'model': model,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'max_tokens': 60,
+        'temperature': 0.9,
+    }
+    headers = {'Content-Type': 'application/json',
+               'Authorization': f'Bearer {api_key}'}
+    try:
+        r = requests.post(api_url, json=payload, headers=headers, timeout=20)
+        r.raise_for_status()
+        result = r.json()
+        text = ''
+        for choice in result.get('choices', []):
+            content = choice.get('message', {}).get('content', '')
+            if isinstance(content, str):
+                text += content
+        text = text.strip().strip('"').strip()
+        if not text or len(text) > 200:
+            print(f'  voice[deepseek] unusable response: {text!r}',
+                  file=sys.stderr)
+            return ''
+        print(f'  voice[deepseek] OK: {text}', file=sys.stderr)
+        return text
+    except Exception as e:
+        print(f'  voice[deepseek] API error: {e} — using template',
+              file=sys.stderr)
+        return ''
 
 
 # ---------------------------------------------------------------------------
@@ -454,17 +528,20 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
             if not grab_frame(ch, nvr, p):
                 failed.append((ch, name))
                 continue
-            dog = vision_verify(p, keys)
+            dog, activity = vision_verify(p, keys)
             if dog == 'YES':
-                found.append((ch, name, p))
+                found.append((ch, name, p, activity))
             elif dog == 'NO':
                 clear.append((ch, name))
             else:
                 uncertain.append((ch, name))
 
         lines = [f'🔍 Find the dogs — {len(channel_ids)} cameras scanned']
-        for ch, name, p in found:
-            lines.append(f'🐕 {name} (ch{ch})')
+        for ch, name, p, activity in found:
+            line = f'🐕 {name} (ch{ch})'
+            if activity:
+                line += f' — {activity}'
+            lines.append(line)
         if uncertain:
             lines.append('❓ Uncertain: '
                          + ', '.join(f'{n} (ch{c})' for c, n in uncertain))
@@ -483,15 +560,18 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
         # by design: only where the dogs WERE found (or a plain "no dogs
         # found"). The full breakdown (clear / uncertain / no signal) stays
         # on Telegram; a verbose announce would get the skill disabled.
+        # If the dogs were found, a DeepSeek call composes a varied, natural
+        # one-liner from location + activity (sleeping / running / ...); the
+        # deterministic template below is the fallback if that call fails.
         vnames = resolve_voice_names(fd, nvr)
-        voice = []
         if found:
-            voice.append('Found the dogs at the '
-                         + ', the '.join(vnames.get(ch, n)
-                                         for ch, n, _ in found) + '.')
+            spots = [(vnames.get(ch, n), act) for ch, n, _, act in found]
+            voice_summary = compose_voice_line(spots, keys)
+            if not voice_summary:
+                voice_summary = ('Found the dogs at the '
+                                 + ', the '.join(n for n, _ in spots) + '.')
         else:
-            voice.append('No dogs found.')
-        voice_summary = ' '.join(voice)
+            voice_summary = 'No dogs found.'
         if summary_file:
             try:
                 with open(summary_file, 'w') as f:
@@ -502,7 +582,7 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
                       file=sys.stderr)
         print('voice summary:', voice_summary)
 
-        for ch, name, p in found:
+        for ch, name, p, activity in found:
             okp = tg_send_photo(bot_token, chat_id, p,
                                 f'🐕 {name} (ch{ch})')
             print(f'photo ch{ch} sent: {okp}')
