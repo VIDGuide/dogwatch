@@ -16,7 +16,8 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY dogwatch-notify.py /app/
 COPY dogwatch-check.sh /app/
 COPY dog-alarm.sh /app/
-RUN chmod +x /app/dogwatch-check.sh /app/dog-alarm.sh
+COPY find-dogs.py /app/
+RUN chmod +x /app/dogwatch-check.sh /app/dog-alarm.sh /app/find-dogs.py
 
 WORKDIR /app
 
