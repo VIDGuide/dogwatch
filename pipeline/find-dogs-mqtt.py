@@ -22,6 +22,7 @@ MQTT_HOST = os.environ.get('MQTT_HOST', '172.17.0.1')
 MQTT_PORT = int(os.environ.get('MQTT_PORT', '1883'))
 MQTT_TOPIC = os.environ.get('MQTT_TOPIC', 'dogwatch')
 TRIGGER_TOPIC = f'{MQTT_TOPIC}/find-dogs/trigger'
+ACK_TOPIC = f'{MQTT_TOPIC}/find-dogs/ack'
 RESULT_TOPIC = f'{MQTT_TOPIC}/find-dogs/result'
 SUMMARY_FILE = '/app/workspace/find-dogs-result.txt'
 
@@ -29,13 +30,34 @@ _scan_lock = threading.Lock()
 _client = None
 
 
+def compose_ack():
+    """DeepSeek-composed 'scanning the yard' line via find-dogs.py ack mode.
+
+    Returns the composed line, or the canned fallback if the call fails.
+    """
+    try:
+        r = subprocess.run(
+            ['python3', '/app/find-dogs.py', 'ack'],
+            capture_output=True, text=True, timeout=30,
+        )
+        line = r.stdout.strip()
+        if line:
+            return line
+    except Exception as e:
+        print(f'find-dogs-mqtt: ack compose error: {e}', flush=True)
+    return 'On it, scanning the yard for the dogs.'
+
+
 def run_scan():
-    """Run the scan (if not already running) and publish the result."""
+    """Publish a varied ack, run the scan, publish the result."""
     if not _scan_lock.acquire(blocking=False):
         print('find-dogs-mqtt: scan already running, ignoring trigger',
               flush=True)
         return
     try:
+        ack = compose_ack()
+        print(f'find-dogs-mqtt: publishing ack: {ack}', flush=True)
+        _client.publish(ACK_TOPIC, ack, qos=0, retain=False)
         print('find-dogs-mqtt: running scan...', flush=True)
         subprocess.run(
             ['python3', '/app/find-dogs.py', 'scan',

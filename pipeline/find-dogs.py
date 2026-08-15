@@ -358,13 +358,12 @@ def vision_verify(image_path, keys):
     return dog, activity
 
 
-def compose_voice_line(spots, keys):
-    """DeepSeek composes a varied, natural one-liner for the Alexa announce.
+def _deepseek_line(prompt):
+    """Call DeepSeek to compose ONE short line. Returns '' on any failure.
 
-    spots = [(voice_name, activity), ...] — e.g. [('Back Door', 'sleeping')].
-    Returns the composed sentence, or '' if the call fails (caller falls
-    back to the deterministic template). Env overrides:
-    DOGWATCH_VOICE_API_URL/_MODEL/_API_KEY (default: deepseek provider).
+    Shared by all voice-line composers (found / no-dogs / scanning ack).
+    Env overrides: DOGWATCH_VOICE_API_URL/_MODEL/_API_KEY
+    (default: deepseek provider key from secrets.json).
     """
     api_url = os.environ.get(
         'DOGWATCH_VOICE_API_URL',
@@ -384,15 +383,6 @@ def compose_voice_line(spots, keys):
               file=sys.stderr)
         return ''
 
-    loc = ', '.join(f'{n} ({a})' if a else n for n, a in spots)
-    prompt = (
-        'Write ONE short, warm, natural sentence telling the owner where '
-        'their dogs are and what they are doing. Speak plainly, like a '
-        'helpful assistant — no emojis, no markdown, no quotes, no '
-        'introductory words. Vary the phrasing and structure each time; '
-        'do not always start with "Found". Keep it under 14 words.\n'
-        f'Dogs found: {loc}.'
-    )
     payload = {
         'model': model,
         'messages': [{'role': 'user', 'content': prompt}],
@@ -421,6 +411,52 @@ def compose_voice_line(spots, keys):
         print(f'  voice[deepseek] API error: {e} — using template',
               file=sys.stderr)
         return ''
+
+
+def compose_voice_line(spots, keys):
+    """DeepSeek composes a varied, natural one-liner for the Alexa announce.
+
+    spots = [(voice_name, activity), ...] — e.g. [('Back Door', 'sleeping')].
+    Returns the composed sentence, or '' if the call fails (caller falls
+    back to the deterministic template).
+    """
+    loc = ', '.join(f'{n} ({a})' if a else n for n, a in spots)
+    prompt = (
+        'Write ONE short, warm, natural sentence telling the owner where '
+        'their dogs are and what they are doing. Speak plainly, like a '
+        'helpful assistant — no emojis, no markdown, no quotes, no '
+        'introductory words. Vary the phrasing and structure each time; '
+        'do not always start with "Found". Keep it under 14 words.\n'
+        f'Dogs found: {loc}.'
+    )
+    return _deepseek_line(prompt)
+
+
+def compose_no_dogs_line():
+    """DeepSeek composes a varied 'no dogs found' line (canned fallback)."""
+    prompt = (
+        'Write ONE short, warm, natural sentence telling the owner that no '
+        'dogs were found anywhere in the yard this time. Speak plainly, '
+        'like a helpful assistant — no emojis, no markdown, no quotes, no '
+        'introductory words. Vary the phrasing and structure each time; do '
+        'not always start with "No". Keep it under 12 words.\n'
+        'No dogs were found in the yard.'
+    )
+    return _deepseek_line(prompt) or 'No dogs found.'
+
+
+def compose_ack_line():
+    """DeepSeek composes a varied 'scanning the yard' ack (canned fallback)."""
+    prompt = (
+        'Write ONE short, natural sentence acknowledging that you are '
+        'starting to scan the yard cameras to find the dogs. Speak plainly, '
+        'like a helpful assistant — no emojis, no markdown, no quotes, no '
+        'introductory words. Vary the phrasing and structure each time; do '
+        'not always start with "On it" or "Scanning". Keep it under 12 '
+        'words.\n'
+        'On it, scanning the yard for the dogs.'
+    )
+    return _deepseek_line(prompt) or 'On it, scanning the yard for the dogs.'
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +613,7 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
                 voice_summary = ('Found the dogs at the '
                                  + ', the '.join(n for n, _ in spots) + '.')
         else:
-            voice_summary = 'No dogs found.'
+            voice_summary = compose_no_dogs_line()
         if summary_file:
             try:
                 with open(summary_file, 'w') as f:
@@ -604,8 +640,16 @@ def main():
     if mode == 'montage':
         return mode_montage(cfg, chat_id, bot_token, fd, nvr)
 
+    if mode == 'ack':
+        # Compose (and print) the 'scanning the yard' ack line for the
+        # Alexa/HA voice path — called by find-dogs-mqtt.py before the scan
+        # so the Echo can acknowledge while the cameras are being scanned.
+        print(compose_ack_line())
+        return 0
+
     if mode != 'scan':
-        print(f'ERROR: unknown mode {mode!r} (scan|montage)', file=sys.stderr)
+        print(f'ERROR: unknown mode {mode!r} (scan|montage|ack)',
+              file=sys.stderr)
         return 1
 
     channel_ids = []
