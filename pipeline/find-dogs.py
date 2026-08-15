@@ -110,11 +110,11 @@ def load_config():
 
 
 def load_vision_keys():
-    """Gemini primary + OpenRouter fallback keys (same as check.sh)."""
+    """Primary vision (qwen via OpenRouter) + fallback, provider-aware keys."""
     api_url = os.environ.get(
         'DOGWATCH_VISION_API_URL',
-        'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions')
-    model = os.environ.get('DOGWATCH_VISION_MODEL', 'gemini-3-flash-preview')
+        'https://openrouter.ai/api/v1/chat/completions')
+    model = os.environ.get('DOGWATCH_VISION_MODEL', 'qwen/qwen3.7-flash')
     api_key = os.environ.get('DOGWATCH_VISION_API_KEY', '')
     fb_url = os.environ.get(
         'DOGWATCH_VISION_FALLBACK_API_URL',
@@ -128,15 +128,21 @@ def load_vision_keys():
             secrets = json.load(f)
         providers = secrets['models']['providers']
         if not api_key:
-            api_key = providers.get('google', {}).get('apiKey', '')
+            if 'openrouter.ai' in api_url:
+                api_key = providers.get('openrouter', {}).get('apiKey', '')
+            else:
+                api_key = providers.get('google', {}).get('apiKey', '')
         if not fb_key:
-            fb_key = providers.get('openrouter', {}).get('apiKey', '')
+            if 'openrouter.ai' in fb_url:
+                fb_key = providers.get('openrouter', {}).get('apiKey', '')
+            else:
+                fb_key = providers.get('google', {}).get('apiKey', '')
     except Exception:
         pass
 
     if not api_key:
         print('ERROR: no vision API key (set DOGWATCH_VISION_API_KEY or '
-              'secrets.json models.providers.google.apiKey)', file=sys.stderr)
+              'secrets.json models.providers.*.apiKey)', file=sys.stderr)
         sys.exit(1)
     return api_url, model, api_key, fb_url, fb_model, fb_key
 

@@ -30,25 +30,26 @@ if [ -z "$BOT_TOKEN" ] && [ -f "$NOTIFY_CONFIG" ]; then
 fi
 
 # Vision model config — all overridable so any OpenAI-compatible vision
-# endpoint can be used instead of Gemini. Defaults point at Gemini's
-# OpenAI-compatible endpoint (https://ai.google.dev/gemini-api/docs/openai).
-#   DOGWATCH_VISION_API_URL   — chat completions endpoint (default: Gemini)
-#   DOGWATCH_VISION_MODEL     — model name (default: gemini-3-flash-preview)
-#   DOGWATCH_VISION_API_KEY   — API key. Falls back to the "google" provider
-#                               key in secrets.json if unset, for backwards
-#                               compatibility with existing Gemini setups.
-VISION_API_URL="${DOGWATCH_VISION_API_URL:-https://generativelanguage.googleapis.com/v1beta/openai/chat/completions}"
-VISION_MODEL="${DOGWATCH_VISION_MODEL:-gemini-3-flash-preview}"
+# endpoint can be used. Primary default is qwen/qwen3.7-flash via OpenRouter
+# (fast, cheap, strong at small objects in wide frames — chosen 2026-08-15
+# after Gemini free tier kept 429ing mid-scan).
+#   DOGWATCH_VISION_API_URL   — chat completions endpoint (default: OpenRouter)
+#   DOGWATCH_VISION_MODEL     — model name (default: qwen/qwen3.7-flash)
+#   DOGWATCH_VISION_API_KEY   — API key. Falls back to the "openrouter"
+#                               provider key in secrets.json when unset; if
+#                               the URL points at Google's endpoint, falls
+#                               back to the "google" provider key instead.
+VISION_API_URL="${DOGWATCH_VISION_API_URL:-https://openrouter.ai/api/v1/chat/completions}"
+VISION_MODEL="${DOGWATCH_VISION_MODEL:-qwen/qwen3.7-flash}"
 VISION_API_KEY="${DOGWATCH_VISION_API_KEY:-}"
 
 # Fallback vision provider (OpenRouter by default) — used automatically when
-# the primary endpoint fails (Gemini quota/429, network, timeout, etc.).
+# the primary endpoint fails (quota/429, network, timeout, model error).
 # Any OpenAI-compatible provider works; override via
 #   DOGWATCH_VISION_FALLBACK_API_URL / DOGWATCH_VISION_FALLBACK_MODEL /
 #   DOGWATCH_VISION_FALLBACK_API_KEY
-# The key falls back to the "openrouter" provider in secrets.json when unset.
-# Default model is the same Gemini family via OpenRouter — separate quota
-# from the direct Gemini endpoint, so a Gemini 429 no longer kills checks.
+# The key falls back to the "openrouter" provider in secrets.json when unset
+# (Google's endpoint is not used for the fallback).
 VISION_FALLBACK_API_URL="${DOGWATCH_VISION_FALLBACK_API_URL:-https://openrouter.ai/api/v1/chat/completions}"
 VISION_FALLBACK_MODEL="${DOGWATCH_VISION_FALLBACK_MODEL:-google/gemini-3-flash-preview}"
 VISION_FALLBACK_API_KEY="${DOGWATCH_VISION_FALLBACK_API_KEY:-}"
@@ -117,18 +118,26 @@ if not bot_token:
     bot_token = accounts.get('dogwatch', {}).get('botToken') or accounts['default']['botToken']
 
 # Vision API key: prefer the explicit DOGWATCH_VISION_API_KEY env var (works
-# for any provider). Falls back to secrets.json's "google" provider key for
-# backwards compatibility with existing Gemini-only setups that never set
-# the new env var.
+# for any provider). Otherwise pick the provider key matching the endpoint
+# URL — OpenRouter for openrouter.ai, Google for generativelanguage — so the
+# key always matches the API being called, whichever model is configured.
 if not VISION_API_KEY:
     try:
-        VISION_API_KEY = secrets['models']['providers']['google']['apiKey']
+        providers = secrets['models']['providers']
+        if 'openrouter.ai' in VISION_API_URL:
+            VISION_API_KEY = providers.get('openrouter', {}).get('apiKey', '')
+        else:
+            VISION_API_KEY = providers.get('google', {}).get('apiKey', '')
     except KeyError:
         pass
 
 if not VISION_FALLBACK_API_KEY:
     try:
-        VISION_FALLBACK_API_KEY = secrets['models']['providers']['openrouter']['apiKey']
+        providers = secrets['models']['providers']
+        if 'openrouter.ai' in VISION_FALLBACK_API_URL:
+            VISION_FALLBACK_API_KEY = providers.get('openrouter', {}).get('apiKey', '')
+        else:
+            VISION_FALLBACK_API_KEY = providers.get('google', {}).get('apiKey', '')
     except KeyError:
         pass
 
