@@ -380,6 +380,16 @@ def resolve_names(fd, nvr):
     return names
 
 
+def resolve_voice_names(fd, nvr):
+    """Voice/TTS-friendly names for the announce path. Config
+    find_dogs.voice_names win (e.g. "12": "Back Door" — "Rear East" is
+    awkward aloud), then channel_names, then NVR names."""
+    names = resolve_names(fd, nvr)
+    for cid, name in (fd.get('voice_names') or {}).items():
+        names[int(cid)] = name
+    return names
+
+
 # ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
@@ -469,23 +479,19 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
         ok = tg_send(bot_token, chat_id, '\n'.join(lines))
         print('summary sent:', ok)
 
-        # Plain-text voice summary for the Alexa/HA announce path.
+        # Plain-text voice summary for the Alexa/HA announce path — concise
+        # by design: only where the dogs WERE found (or a plain "no dogs
+        # found"). The full breakdown (clear / uncertain / no signal) stays
+        # on Telegram; a verbose announce would get the skill disabled.
+        vnames = resolve_voice_names(fd, nvr)
         voice = []
         if found:
             voice.append('Found the dogs at '
-                         + ', '.join(n for _, n, _ in found) + '.')
-        if uncertain:
-            voice.append('Not sure at '
-                         + ', '.join(n for _, n in uncertain) + '.')
-        if clear:
-            voice.append('No dogs at '
-                         + ', '.join(n for _, n in clear) + '.')
-        if failed:
-            voice.append('No signal from '
-                         + ', '.join(n for _, n in failed) + '.')
-        if not found and not uncertain:
+                         + ', '.join(vnames.get(ch, n) for ch, n, _ in found)
+                         + '.')
+        else:
             voice.append('No dogs found.')
-        voice_summary = ' '.join(voice) or 'Find the dogs scan completed.'
+        voice_summary = ' '.join(voice)
         if summary_file:
             try:
                 with open(summary_file, 'w') as f:
