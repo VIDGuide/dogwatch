@@ -17,9 +17,12 @@ Config: "find_dogs" section in dogwatch-notify.config.json (gitignored):
       "nvr_host": "192.168.1.20",
       "nvr_user": "admin",
       "nvr_password": "...",
-      "channels": [1, 8, 10, 12, 14]           # ids to scan (in scope)
+      "channels": [1, 8, 10, 12, 14],           # ids to scan (in scope)
+      "channel_names": {"1": "Side East", ...}  # optional; overrides NVR names
     }
-Channel names are fetched live from the NVR (ISAPI) so labels stay current.
+Channel names come from config find_dogs.channel_names when present, falling
+back to a live NVR ISAPI fetch (so labels stay readable even where the NVR
+still shows default names like "IPCamera 03").
 Env overrides: DOGWATCH_FIND_DOGS_NVR_HOST/_USER/_PASSWORD, and the channel
 ids can be passed on the command line.
 
@@ -367,12 +370,22 @@ def tg_send_photo(token, chat_id, photo_path, caption):
         return False
 
 
+def resolve_names(fd, nvr):
+    """Channel display names: config find_dogs.channel_names win; NVR ISAPI
+    names fill the gaps (fallback). The NVR still shows default names for
+    several channels (e.g. "IPCamera 03"), so the config map is authoritative."""
+    names = fetch_channels(nvr)
+    for cid, name in (fd.get('channel_names') or {}).items():
+        names[int(cid)] = name
+    return names
+
+
 # ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
 def mode_montage(cfg, chat_id, bot_token, fd, nvr):
     """Grab every NVR channel, stitch into one labeled grid, send it."""
-    names = fetch_channels(nvr)
+    names = resolve_names(fd, nvr)
     ids = sorted(names.keys()) or list(range(1, 17))
     grabs, failed = [], []
     with tempfile.TemporaryDirectory() as td:
@@ -415,7 +428,7 @@ def mode_montage(cfg, chat_id, bot_token, fd, nvr):
 
 def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys):
     """Grab + vision-verify each in-scope channel, report with photos."""
-    names = fetch_channels(nvr)
+    names = resolve_names(fd, nvr)
     if not channel_ids:
         channel_ids = fd.get('channels', [])
     if not channel_ids:
