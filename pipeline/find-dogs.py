@@ -486,9 +486,9 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
         vnames = resolve_voice_names(fd, nvr)
         voice = []
         if found:
-            voice.append('Found the dogs at '
-                         + ', '.join(vnames.get(ch, n) for ch, n, _ in found)
-                         + '.')
+            voice.append('Found the dogs at the '
+                         + ', the '.join(vnames.get(ch, n)
+                                         for ch, n, _ in found) + '.')
         else:
             voice.append('No dogs found.')
         voice_summary = ' '.join(voice)
