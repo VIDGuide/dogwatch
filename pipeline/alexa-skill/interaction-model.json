@@ -1,0 +1,40 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "dog finder",
+      "intents": [
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "FindDogsIntent",
+          "slots": [],
+          "samples": [
+            "where are the dogs",
+            "where is the dog",
+            "find the dogs",
+            "are the dogs outside",
+            "are the dogs in the yard",
+            "check the yard for the dogs",
+            "are the dogs at the fence",
+            "where are my dogs",
+            "what are the dogs doing",
+            "is the dog in the yard",
+            "where are the dogs now",
+            "are the dogs at the back gate"
+          ]
+        }
+      ],
+      "types": []
+    }
+  }
+}

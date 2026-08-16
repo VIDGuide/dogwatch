@@ -14,11 +14,17 @@ corresponding <device>-suffixed topics. A bare trigger (no suffix) keeps the
 original behaviour — ack/result on the base topics, announced on the default
 group of Echos.
 
+Ack suppression: a trigger payload of "silent" (or JSON {"ack": false})
+skips the ack publish — used by the Alexa custom-skill webhook, where the
+skill itself speaks the "on it, scanning the yard" line immediately and a
+second HA ack would double-announce. The result is always published.
+
 MQTT env (same as the notifier): MQTT_HOST / MQTT_PORT / MQTT_TOPIC.
 Result summary file lives in the shared workspace volume so the HA-side
 consumers (and humans) can inspect what was said.
 """
 
+import json
 import os
 import subprocess
 import threading
@@ -51,6 +57,22 @@ def _device_from_topic(topic):
     return ''
 
 
+def _is_silent(payload):
+    """True when the trigger asks for no ack publish (skill speaks it).
+
+    Accepts the literal string 'silent' or JSON {"ack": false}.
+    """
+    if isinstance(payload, bytes):
+        payload = payload.decode('utf-8', 'replace')
+    if payload == 'silent':
+        return True
+    try:
+        d = json.loads(payload)
+        return isinstance(d, dict) and d.get('ack') is False
+    except (ValueError, TypeError):
+        return False
+
+
 def compose_ack():
     """DeepSeek-composed 'scanning the yard' line via find-dogs.py ack mode.
 
@@ -69,8 +91,8 @@ def compose_ack():
     return 'On it, scanning the yard for the dogs.'
 
 
-def run_scan(device=''):
-    """Publish a varied ack, run the scan, publish the result.
+def run_scan(device='', silent=False):
+    """Publish a varied ack (unless silent), run the scan, publish the result.
 
     With a device suffix the ack/result go to <topic>/<device> so HA can
     announce on the invoking Echo; without one they use the base topics
@@ -84,10 +106,14 @@ def run_scan(device=''):
               flush=True)
         return
     try:
-        ack = compose_ack()
-        print(f'find-dogs-mqtt: publishing ack ({ack_topic}): {ack}',
-              flush=True)
-        _client.publish(ack_topic, ack, qos=0, retain=False)
+        if not silent:
+            ack = compose_ack()
+            print(f'find-dogs-mqtt: publishing ack ({ack_topic}): {ack}',
+                  flush=True)
+            _client.publish(ack_topic, ack, qos=0, retain=False)
+        else:
+            print('find-dogs-mqtt: silent trigger — ack suppressed '
+                  '(skill speaks it)', flush=True)
         print('find-dogs-mqtt: running scan...', flush=True)
         subprocess.run(
             ['python3', '/app/find-dogs.py', 'scan',
@@ -124,9 +150,12 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 def on_message(client, userdata, msg):
     device = _device_from_topic(msg.topic)
+    silent = _is_silent(msg.payload)
     print(f'find-dogs-mqtt: trigger received ({msg.topic}): {msg.payload!r}'
-          + (f' [device={device}]' if device else ''), flush=True)
-    threading.Thread(target=run_scan, args=(device,), daemon=True).start()
+          + (f' [device={device}]' if device else '')
+          + (' [silent]' if silent else ''), flush=True)
+    threading.Thread(target=run_scan, args=(device, silent),
+                     daemon=True).start()
 
 
 def main():

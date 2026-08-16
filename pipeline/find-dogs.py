@@ -271,9 +271,12 @@ PROMPT = (
     '{"dog": "YES"|"NO"|"UNCERTAIN", "activity": "short phrase"}\n'
     'dog = YES if a dog is clearly or very likely present, NO if definitely '
     'not, UNCERTAIN if you cannot tell.\n'
-    'activity = 2-5 words describing what the dog(s) are doing (e.g. "sleeping", '
-    '"running around", "barking at the fence", "lying in the sun") when dog is '
-    'YES; empty string when dog is NO or UNCERTAIN.'
+    'activity = 2-5 words describing ONLY the dog(s)\' action or pose (e.g. '
+    '"sleeping", "running", "barking", "lying down", "digging", "sitting", '
+    '"pacing", "playing") when dog is YES; empty string when dog is NO or '
+    'UNCERTAIN. Do NOT include any location or place words (no "by", "at", '
+    '"near", "on the", "in the yard", furniture, rooms, or camera names) — '
+    'the location is already known from the camera name.'
 )
 
 
@@ -427,6 +430,10 @@ def compose_voice_line(spots, keys):
         'helpful assistant — no emojis, no markdown, no quotes, no '
         'introductory words. Vary the phrasing and structure each time; '
         'do not always start with "Found". Keep it under 14 words.\n'
+        'The location name (e.g. "Back Door") is WHERE the dog is — refer '
+        'to it naturally as a place ("by the back door", "near the back '
+        'gate"), NEVER as the subject of the sentence, and never repeat a '
+        'location word that already appears in the activity description.\n'
         f'Dogs found: {loc}.'
     )
     return _deepseek_line(prompt)
