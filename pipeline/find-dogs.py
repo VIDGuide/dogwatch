@@ -18,6 +18,8 @@ Config: "find_dogs" section in dogwatch-notify.config.json (gitignored):
       "nvr_user": "admin",
       "nvr_password": "...",
       "channels": [1, 8, 10, 12, 14],           # ids to scan (in scope)
+      "channel_order": [8, 14, 10, 12, 1],      # optional: try these first
+                                                 # (early-exit friendly)
       "channel_names": {"1": "Side East", ...}  # optional; overrides NVR names
     }
 Channel names come from config find_dogs.channel_names when present, falling
@@ -570,6 +572,15 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
     names = resolve_names(fd, nvr)
     if not channel_ids:
         channel_ids = fd.get('channels', [])
+        # Preferred scan order (early-exit friendly): channel_order lists
+        # channels to try first, in order; the remaining in-scope channels
+        # follow as configured. Absent key = scan channels in config order.
+        # Explicit CLI channel lists are never reordered.
+        order = fd.get('channel_order') or []
+        if order:
+            preferred = [c for c in order if c in channel_ids]
+            rest = [c for c in channel_ids if c not in preferred]
+            channel_ids = preferred + rest
     if not channel_ids:
         print('ERROR: no channels to scan (config find_dogs.channels or CLI)',
               file=sys.stderr)
