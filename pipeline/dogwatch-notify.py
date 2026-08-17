@@ -645,7 +645,7 @@ def capture_snapshot(camera_name: str) -> str:
 
 # ---- MQTT ----
 
-_last_on_ts: dict = {}  # debounce per camera — keyed by camera name
+_last_on_ts: dict = {}  # debounce per (camera, slug) — so a digging event right after a dog_at_fence event still gets its own snapshot slot
 
 # ---- Detector-published snapshot cache ----
 # The detector container publishes the EXACT frame that inference ran on
@@ -739,6 +739,15 @@ def _handle_on_event(client, camera, slug, bbox, attr, entry, now):
         _archive_debug_snapshot(camera, snap_path, slug, event_ts)
         _cleanup_tmp_snapshot_later(snap_path)
 
+    # Write the status entry BEFORE the (potentially slow) Telegram upload.
+    # dogwatch-check.sh runs on a 5-min cycle with a 4-min CUTOFF; if we only
+    # wrote after the photo send, an event landing just as a check reads the
+    # file could age past the cutoff before the next cycle — exactly how the
+    # 13:55:27 digging event (79%) got skipped on 2026-08-17.
+    with open(STATUS_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+    if snap_path:
         score = attr.get("score", 0.0) if attr else 0.0
         score_pct = f" {score:.0%}" if score else ""
         if slug == "dog_at_fence":
@@ -751,9 +760,6 @@ def _handle_on_event(client, camera, slug, bbox, attr, entry, now):
     else:
         fallback = f"🐕 Alert: {slug} ({camera}) @ {ts_str}"
         send_telegram_text(fallback)
-
-    with open(STATUS_FILE, "a") as f:
-        f.write(json.dumps(entry) + "\n")
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
@@ -872,9 +878,16 @@ def on_message(client, userdata, msg):
     # few ms after the event message) without blocking the MQTT loop.
     deferred = False
     if raw == "ON" and slug in ("dog_at_fence", "digging"):
-        last_ts = _last_on_ts.get(camera, 0)
+        # Debounce per (camera, slug), NOT per camera. A digging event that
+        # arrives within 25s of a dog_at_fence event used to be swallowed by
+        # the fence event's debounce slot: it got NO snapshot, the check loop
+        # silently skipped it (if not p['snapshot']: continue), and the dog
+        # alarm never even got a chance to verify. digging is the
+        # alarm-critical event — it always gets its own snapshot slot.
+        dkey = f"{camera}:{slug}"
+        last_ts = _last_on_ts.get(dkey, 0)
         if now - last_ts > 25:
-            _last_on_ts[camera] = now
+            _last_on_ts[dkey] = now
             threading.Thread(
                 target=_handle_on_event,
                 args=(client, camera, slug, bbox, attr, dict(entry), now),

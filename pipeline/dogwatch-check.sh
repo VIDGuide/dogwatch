@@ -76,6 +76,7 @@ export DW_SECRETS_FILE="$SECRETS_FILE"
 export DW_BOT_TOKEN="$BOT_TOKEN"
 export DW_CHAT_ID="$CHAT_ID"
 export DW_STATUS_FILE="$STATUS_FILE"
+export DW_NOTIFY_CONFIG="$NOTIFY_CONFIG"
 export DW_VISION_API_URL="$VISION_API_URL"
 export DW_VISION_MODEL="$VISION_MODEL"
 export DW_VISION_API_KEY="$VISION_API_KEY"
@@ -148,6 +149,67 @@ if not VISION_API_KEY:
         file=sys.stderr,
     )
     sys.exit(1)
+
+# ---- Camera config (fresh-frame fallback when an event has no snapshot) ----
+NOTIFY_CONFIG = os.environ.get('DW_NOTIFY_CONFIG', '')
+CAMERAS = {}
+if NOTIFY_CONFIG and os.path.exists(NOTIFY_CONFIG):
+    try:
+        with open(NOTIFY_CONFIG) as f:
+            CAMERAS = json.load(f).get('cameras', {})
+    except Exception as exc:
+        print(f'  WARN: cannot load cameras from {NOTIFY_CONFIG}: {exc}',
+              file=sys.stderr)
+
+
+def capture_fresh(camera_name):
+    """Grab a clean frame NOW (RTSP via ffmpeg, HTTP ISAPI fallback).
+
+    Used when an event landed in the status file without a usable snapshot
+    (notifier debounce race, write race, or tmp cleanup). Mirrors the
+    notifier's capture_snapshot so a snapshot-less digging event still gets
+    vision-verified — and the dog alarm still gets its chance to fire.
+    """
+    cam = CAMERAS.get(camera_name)
+    if not cam:
+        return ''
+    snap_path = f'/tmp/dogwatch_check_{camera_name}_{int(time.time())}.jpg'
+    url = cam.get('snapshot_rtsp_fallback', cam.get('snapshot_url', ''))
+    try:
+        subprocess.run(
+            ['ffmpeg', '-rtsp_transport', 'tcp', '-skip_frame', 'nokey',
+             '-i', url, '-frames:v', '1', '-q:v', '2', '-update', '1',
+             '-y', snap_path],
+            capture_output=True, timeout=15)
+        if os.path.exists(snap_path) and os.path.getsize(snap_path) > 1000:
+            return snap_path
+        try:
+            os.remove(snap_path)
+        except OSError:
+            pass
+    except Exception as exc:
+        print(f'  capture_fresh RTSP failed for {camera_name}: {exc}',
+              file=sys.stderr)
+    su = cam.get('snapshot_url', '')
+    if su.startswith('http://') or su.startswith('https://'):
+        try:
+            import requests
+            from requests.auth import HTTPDigestAuth
+            parsed = requests.utils.urlparse(su)
+            user, pw = parsed.username, parsed.password
+            clean_url = su.replace(f'{user}:{pw}@', '') if user else su
+            resp = requests.get(clean_url, auth=HTTPDigestAuth(user, pw),
+                                timeout=10)
+            resp.raise_for_status()
+            with open(snap_path, 'wb') as f:
+                f.write(resp.content)
+            if os.path.getsize(snap_path) > 100:
+                return snap_path
+        except Exception as exc:
+            print(f'  capture_fresh HTTP failed for {camera_name}: {exc}',
+                  file=sys.stderr)
+    return ''
+
 
 TG_URL = f'https://api.telegram.org/bot{bot_token}/sendMessage'
 
@@ -344,6 +406,14 @@ try:
                         basename = f'dogwatch_{int(e["ts"])}.jpg'
                         ws_path = os.path.join(WORKSPACE_DIR, basename)
                         shutil.copy2(snap, ws_path)
+                    else:
+                        # No stored snapshot (debounce/race/cleanup) — try a
+                        # fresh frame at check time so vision still runs.
+                        fresh = capture_fresh(e.get('camera', 'camera'))
+                        if fresh:
+                            ws_path = fresh
+                            print(f'  fresh capture for {label} at {ts_local}',
+                                  file=sys.stderr)
 
                     pending.append({
                         'type': label,
@@ -351,6 +421,7 @@ try:
                         'snapshot': ws_path,
                         'bbox': e.get('bbox'),
                         'score': e.get('score', 0.0),
+                        'camera': e.get('camera', 'camera'),
                     })
             except (json.JSONDecodeError, KeyError):
                 pass
@@ -381,6 +452,15 @@ tg_send(alert_text)
 # ---- Vision verify each event ----
 for p in pending:
     if not p['snapshot']:
+        # No snapshot and the fresh capture failed — say so explicitly
+        # instead of silently dropping the event (a silent skip here is
+        # exactly how a digging event could vanish and the alarm never fire).
+        tg_send(
+            f'⚠️ *No snapshot available* for '
+            f'{p["type"].replace("_", " ").title()} at {p["time"]} — '
+            f'fresh capture failed too. Vision check skipped; no alarm '
+            f'decision made for this event.'
+        )
         continue
 
     result = vision_verify(p['snapshot'])
