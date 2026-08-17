@@ -2,11 +2,16 @@
 """find-dogs-mqtt.py — MQTT trigger listener for the find-dogs scan.
 
 Long-lived companion to the notifier (started by entrypoint.sh). Subscribes
-to <base>/find-dogs/trigger and <base>/find-dogs/trigger/# (device-specific,
+to <base>/find-dogs/trigger and <base>/find-dogs/trigger/+ (device-specific,
 e.g. dogwatch/find-dogs/trigger/lounge_echo); on a message runs the find-dogs
 scan and publishes the plain-text voice summary to <base>/find-dogs/result
 (or <base>/find-dogs/result/<device>), which Home Assistant picks up and
 announces on an Echo. This is the Alexa/"where are the dogs" voice path.
+
+NOTE: uses the single-level '+' wildcard, NOT '#': '#' also matches the
+parent topic, so trigger/ack/result messages on the bare topic would be
+delivered twice (once per subscription/automation) and every Echo would
+announce twice. '+' matches only <topic>/<device>.
 
 The device suffix lets HA announce on the *invoking* Echo: HA publishes to
 <base>/find-dogs/trigger/<device> and the ack/result come back on the
@@ -144,8 +149,8 @@ def run_scan(device='', silent=False):
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     print(f'find-dogs-mqtt: connected (rc={reason_code}), '
-          f'subscribing {TRIGGER_TOPIC} + {TRIGGER_TOPIC}/#', flush=True)
-    client.subscribe([(TRIGGER_TOPIC, 0), (f'{TRIGGER_TOPIC}/#', 0)])
+          f'subscribing {TRIGGER_TOPIC} + {TRIGGER_TOPIC}/+', flush=True)
+    client.subscribe([(TRIGGER_TOPIC, 0), (f'{TRIGGER_TOPIC}/+', 0)])
 
 
 def on_message(client, userdata, msg):
