@@ -37,7 +37,6 @@ def main():
             (ts_start, ts_end),
         )
         rows = cur.fetchall()
-        conn.close()
     except Exception as e:
         # Write an error marker so the report script knows what happened
         result = {"error": str(e), "events": []}
@@ -57,11 +56,36 @@ def main():
             "time": datetime.fromtimestamp(ts, AEST).strftime("%H:%M:%S"),
         })
 
+    # Per-camera and per-hour breakdowns (AEST) for the richer daily report.
+    by_camera = {}
+    for cam, etype, cnt in conn.execute(
+        """SELECT camera, event_type, COUNT(*) FROM events
+           WHERE ts >= ? AND ts < ? GROUP BY camera, event_type""",
+        (ts_start, ts_end),
+    ):
+        bc = by_camera.setdefault(cam, {})
+        bc[etype] = cnt
+        bc["total"] = bc.get("total", 0) + cnt
+
+    by_hour = []
+    for hr, cnt in conn.execute(
+        """SELECT CAST(strftime('%H', ts, 'unixepoch', '+10 hours') AS INTEGER) AS hr,
+                  COUNT(*) FROM events
+           WHERE ts >= ? AND ts < ?
+           GROUP BY strftime('%H', ts, 'unixepoch', '+10 hours')
+           ORDER BY hr""",
+        (ts_start, ts_end),
+    ):
+        by_hour.append({"hour": f"{hr:02d}:00", "count": cnt})
+    conn.close()
+
     summary = {
         "date": day_start.strftime("%Y-%m-%d"),
         "event_count": len(events),
         "dog_at_fence_count": sum(1 for e in events if e["type"] == "dog_at_fence"),
         "digging_count": sum(1 for e in events if e["type"] == "digging"),
+        "by_camera": by_camera,
+        "by_hour": by_hour,
         "events": events,
     }
 

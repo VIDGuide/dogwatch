@@ -775,6 +775,24 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
             except OSError as e:
                 print(f'ERROR: cannot write summary file {summary_file}: {e}',
                       file=sys.stderr)
+            # Structured sidecar for the daily-stats capture (find-dogs-mqtt
+            # reads it to classify found / empty / inside without text
+            # heuristics on the DeepSeek-varied voice line).
+            sidecar = os.path.splitext(summary_file)[0] + '.json'
+            try:
+                with open(sidecar, 'w') as f:
+                    json.dump({
+                        'found': bool(found),
+                        'count': len(found),
+                        'channels': [ch for ch, _, _, _ in found],
+                        'inside': bool(not found and door == 'open'
+                                       and len(channel_ids) != 1),
+                        'scanned': scanned,
+                        'early_exit': early_exit,
+                    }, f)
+            except OSError as e:
+                print(f'ERROR: cannot write result sidecar {sidecar}: {e}',
+                      file=sys.stderr)
         print('voice summary:', voice_summary)
 
         for ch, name, p, activity in found:

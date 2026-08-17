@@ -47,6 +47,7 @@ NOTIFY_CONFIG="${DOGWATCH_NOTIFY_CONFIG:-$SCRIPT_DIR/dogwatch-notify.config.json
 
 if [ ! -f "$NOTIFY_CONFIG" ]; then
   echo "dog-alarm: notify config not found: $NOTIFY_CONFIG" >&2
+  bump_stats alarm_errors
   exit 5
 fi
 
@@ -75,7 +76,7 @@ out = {
 }
 print(json.dumps(out))
 PYEOF
-) || exit 5
+) || { bump_stats alarm_errors; exit 5; }
 
 get_cfg() { echo "$CFG_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
 
@@ -145,6 +146,11 @@ PYEOF
 
 log() { echo "dog-alarm: $*"; }
 
+# Daily stats capture (per-day counters for the report) — never fatal.
+bump_stats() {
+  python3 "$SCRIPT_DIR/stats.py" bump "$1" >/dev/null 2>&1 || true
+}
+
 # ---- Guard 1: enabled? ----
 if [ "$ALARM_ENABLED" != "True" ]; then
   log "disabled or not configured — exiting silently"
@@ -167,6 +173,7 @@ if [ "$IN_WINDOW" -ne 1 ]; then
     tg_msg "🔕 *Dog Alarm not sounded* — \`$REASON\`
 Outside allowed hours ($WINDOW_START–$WINDOW_END local)."
   fi
+  bump_stats alarm_blocked_window
   exit 2
 fi
 
@@ -181,12 +188,14 @@ if [ -n "$LAST_EPOCH" ] && [ $(( NOW_EPOCH - LAST_EPOCH )) -lt "$MIN_INTERVAL" ]
     tg_msg "🔕 *Dog Alarm not sounded* — \`$REASON\`
 Replay guard: last sounded at $(date -d @$LAST_EPOCH '+%H:%M:%S'), min interval ${MIN_INTERVAL}s."
   fi
+  bump_stats alarm_blocked_replay
   exit 4
 fi
 
 # ---- Obtain HA bearer token ----
 if [ -z "$HA_TOKEN" ] && [ -z "$HA_REFRESH_TOKEN" ]; then
   log "ERROR: no HA credential configured (alarm.ha_token or alarm.ha_refresh_token)"
+  bump_stats alarm_errors
   exit 5
 fi
 BEARER="$HA_TOKEN"
@@ -204,9 +213,10 @@ except Exception as e:
     print(f'ERROR {e}', file=sys.stderr)
     sys.exit(1)
 PYEOF
-) || exit 5
+) || { bump_stats alarm_errors; exit 5; }
   if [ -z "$BEARER" ] || [ "${BEARER#ERROR}" != "$BEARER" ]; then
     log "ERROR: HA token exchange failed ($BEARER)"
+    bump_stats alarm_errors
     exit 5
   fi
 fi
@@ -233,11 +243,13 @@ PYEOF
 if [ -z "$HA_STATUS" ]; then
   log "ERROR: siren.turn_on failed (no response)"
   tg_msg "⚠️ *Dog alarm failed* — \`$REASON\` — Home Assistant returned nothing."
+  bump_stats alarm_errors
   exit 5
 fi
 if [ "${HA_STATUS#HTTP}" != "$HA_STATUS" ] || [ "${HA_STATUS#ERROR}" != "$HA_STATUS" ]; then
   log "ERROR: siren.turn_on failed: $HA_STATUS"
   tg_msg "⚠️ *Dog alarm failed* — \`$REASON\` — Home Assistant: \`$HA_STATUS\`"
+  bump_stats alarm_errors
   exit 5
 fi
 
@@ -248,4 +260,5 @@ log "sounded at $(date '+%H:%M:%S') (reason: $REASON) — HA status $HA_STATUS"
 # Raise the event back to the chat
 tg_msg "🔔 *Dog Alarm sounded* — \`$REASON\`
 $(date '+%H:%M:%S') local · entity \`$ENTITY_ID\`"
+bump_stats alarm_sounds
 exit 0

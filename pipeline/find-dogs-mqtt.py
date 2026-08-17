@@ -46,6 +46,23 @@ import time
 
 import paho.mqtt.client as mqtt
 
+# Daily stats capture (per-day counters for the Daily Dog Report). Fail
+# gracefully if the module is missing (older image) — capture must never
+# break the listener.
+try:
+    import stats as _stats
+except ImportError:
+    _stats = None
+
+
+def bump_stats(key, amount=1):
+    if _stats is None:
+        return
+    try:
+        _stats.bump(key, amount)
+    except Exception as e:
+        print(f'find-dogs-mqtt: stats bump {key} failed: {e}', flush=True)
+
 MQTT_HOST = os.environ.get('MQTT_HOST', '172.17.0.1')
 MQTT_PORT = int(os.environ.get('MQTT_PORT', '1883'))
 MQTT_TOPIC = os.environ.get('MQTT_TOPIC', 'dogwatch')
@@ -54,6 +71,7 @@ ACK_TOPIC = f'{MQTT_TOPIC}/find-dogs/ack'
 RESULT_TOPIC = f'{MQTT_TOPIC}/find-dogs/result'
 DOOR_TOPIC = f'{MQTT_TOPIC}/dogdoor'
 SUMMARY_FILE = '/app/workspace/find-dogs-result.txt'
+RESULT_SIDECAR = '/app/workspace/find-dogs-result.json'
 DOOR_STATE_FILE = '/app/workspace/dogdoor.state'
 
 _scan_lock = threading.Lock()
@@ -159,6 +177,25 @@ def write_door_state(payload):
               flush=True)
 
 
+def _classify_and_bump():
+    """Bump find_dogs_found / empty / inside from the scan's sidecar JSON.
+
+    find-dogs.py writes find-dogs-result.json next to the summary file when
+    it runs a scan. Missing sidecar (older image, error path) → no bump.
+    """
+    try:
+        with open(RESULT_SIDECAR) as f:
+            r = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return
+    if r.get('found'):
+        bump_stats('find_dogs_found')
+    elif r.get('inside'):
+        bump_stats('find_dogs_inside')
+    else:
+        bump_stats('find_dogs_empty')
+
+
 def run_scan(device='', silent=False, channel=None):
     """Publish a varied ack (unless silent), run the scan, publish the result.
 
@@ -181,6 +218,7 @@ def run_scan(device='', silent=False, channel=None):
         if bed:
             print(f'find-dogs-mqtt: bedtime fast path — publishing result '
                   f'({result_topic}): {bed}', flush=True)
+            bump_stats('find_dogs_inbed')
             _client.publish(result_topic, bed, qos=0, retain=False)
             return
         if not silent:
@@ -208,6 +246,7 @@ def run_scan(device='', silent=False, channel=None):
         print(f'find-dogs-mqtt: publishing result ({result_topic}): {summary}',
               flush=True)
         _client.publish(result_topic, summary, qos=0, retain=False)
+        _classify_and_bump()
     except subprocess.TimeoutExpired:
         print('find-dogs-mqtt: scan timed out', flush=True)
         _client.publish(result_topic, 'The find the dogs scan timed out.',
@@ -238,6 +277,7 @@ def on_message(client, userdata, msg):
           + (f' [device={device}]' if device else '')
           + (' [silent]' if silent else '')
           + (f' [channel={channel}]' if channel else ''), flush=True)
+    bump_stats('find_dogs')
     threading.Thread(target=run_scan, args=(device, silent, channel),
                      daemon=True).start()
 

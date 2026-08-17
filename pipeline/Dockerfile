@@ -18,6 +18,7 @@ COPY dogwatch-check.sh /app/
 COPY dog-alarm.sh /app/
 COPY find-dogs.py /app/
 COPY find-dogs-mqtt.py /app/
+COPY stats.py /app/
 RUN chmod +x /app/dogwatch-check.sh /app/dog-alarm.sh /app/find-dogs.py /app/find-dogs-mqtt.py
 
 WORKDIR /app

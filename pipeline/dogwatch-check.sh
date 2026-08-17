@@ -60,6 +60,10 @@ VISION_FALLBACK_API_KEY="${DOGWATCH_VISION_FALLBACK_API_KEY:-}"
 ALARM_SCRIPT="${DOGWATCH_ALARM_SCRIPT:-/app/dog-alarm.sh}"
 
 export DW_ALARM_SCRIPT="$ALARM_SCRIPT"
+# Daily stats capture (per-day counters for the Daily Dog Report). The stats
+# script lives in the image; override for host testing. Failures are never
+# fatal to the alert pipeline.
+export DW_STATS_SCRIPT="${DW_STATS_SCRIPT:-/app/stats.py}"
 
 mkdir -p "$WORKSPACE_SNAP_DIR"
 rm -f "$MARKER_FILE"
@@ -252,6 +256,19 @@ def tg_send_photo(photo_path, caption):
     except Exception:
         return False
 
+def bump_stats(key, amount=1):
+    """Record a daily counter for the report; capture must never break the
+    alert pipeline, so failures are swallowed."""
+    try:
+        subprocess.run(
+            [os.environ.get('DW_STATS_SCRIPT', '/app/stats.py'),
+             'bump', key, str(amount)],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def vision_verify_with(image_path, api_url, model, api_key, provider_label):
     """Call one OpenAI-compatible vision endpoint to assess (a) dog presence
     and (b) whether it is digging.
@@ -355,6 +372,8 @@ def vision_verify_with(image_path, api_url, model, api_key, provider_label):
         if dog not in ('DOG', 'NO_DOG', 'UNCERTAIN'):
             dog = 'UNCERTAIN'
         print(f'  vision_verify[{provider_label}] OK: dog={dog} digging={digging}', file=sys.stderr)
+        bump_stats('vision_primary_ok' if provider_label == 'primary'
+                   else 'vision_fallback_ok')
         return {'dog': dog, 'digging': digging}
     except Exception as e:
         print(f'  vision_verify[{provider_label}] API error: {e}', file=sys.stderr)
@@ -463,10 +482,12 @@ for p in pending:
         )
         continue
 
+    bump_stats('vision_checks')
     result = vision_verify(p['snapshot'])
     event_label = p['type'].replace('_', ' ').title()
 
     if result is None:
+        bump_stats('vision_failed')
         # Vision API call failed (rate limit, network error, bad response,
         # etc.) — say so explicitly rather than going silent. Previously
         # this just `continue`d, so a quota exhaustion looked identical to
@@ -485,6 +506,7 @@ for p in pending:
     digging = result['digging']
 
     if verdict == 'DOG':
+        bump_stats('vision_dog_confirmed')
         dig_line = ''
         if digging is True:
             dig_line = '\n⚠️ *DIGGING detected* — dog appears to be digging!'
@@ -508,11 +530,13 @@ for p in pending:
             except Exception as e:
                 print(f'  dog-alarm hook error: {e}', file=sys.stderr)
     elif verdict == 'NO_DOG':
+        bump_stats('vision_false_alarm')
         tg_send(
             f'❌ *False alarm* — the {event_label} at {p["time"]} '
             f'was just wind/leaves/shadow.'
         )
     elif verdict == 'UNCERTAIN':
+        bump_stats('vision_uncertain')
         tg_send(
             f'❓ *Inconclusive* — vision could not confirm or deny the '
             f'{event_label} at {p["time"]}. Check the snapshot manually.'
