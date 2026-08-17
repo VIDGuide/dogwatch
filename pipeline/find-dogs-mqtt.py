@@ -26,6 +26,13 @@ Payloads:
   {"ack": false, "channel": N} — scan ONLY camera N, skip the ack
                                  (Alexa "check for dogs at <camera>")
 
+Doggy door (reed switch on the inner locking panel): HA automation
+publishes 'locked' / 'open' to <base>/dogdoor (retained). The listener
+persists it to the workspace state file so find-dogs.py can infer
+"they're inside" when a full scan finds nothing while the door is open.
+Bedtime (midnight-06:00 and 22:00+) short-circuits triggers entirely — the
+result is the 'in bed' line, no ack, no scan.
+
 MQTT env (same as the notifier): MQTT_HOST / MQTT_PORT / MQTT_TOPIC.
 Result summary file lives in the shared workspace volume so the HA-side
 consumers (and humans) can inspect what was said.
@@ -35,6 +42,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 
 import paho.mqtt.client as mqtt
 
@@ -44,7 +52,9 @@ MQTT_TOPIC = os.environ.get('MQTT_TOPIC', 'dogwatch')
 TRIGGER_TOPIC = f'{MQTT_TOPIC}/find-dogs/trigger'
 ACK_TOPIC = f'{MQTT_TOPIC}/find-dogs/ack'
 RESULT_TOPIC = f'{MQTT_TOPIC}/find-dogs/result'
+DOOR_TOPIC = f'{MQTT_TOPIC}/dogdoor'
 SUMMARY_FILE = '/app/workspace/find-dogs-result.txt'
+DOOR_STATE_FILE = '/app/workspace/dogdoor.state'
 
 _scan_lock = threading.Lock()
 _client = None
@@ -109,6 +119,46 @@ def compose_ack():
     return 'On it, scanning the yard for the dogs.'
 
 
+def in_bed_line():
+    """Return the composed 'in bed' line if it's bedtime, else ''.
+
+    Delegates to find-dogs.py inbed mode (single source of truth for the
+    bedtime gate: midnight-06:00 and 22:00+ -> dogs are crated). The caller
+    skips the camera scan entirely and publishes this as the result.
+    """
+    try:
+        r = subprocess.run(
+            ['python3', '/app/find-dogs.py', 'inbed'],
+            capture_output=True, text=True, timeout=30,
+        )
+        return r.stdout.strip()
+    except Exception as e:
+        print(f'find-dogs-mqtt: inbed check error: {e}', flush=True)
+        return ''
+
+
+def write_door_state(payload):
+    """Persist the doggy-door panel state for find-dogs.py to read.
+
+    Payload is the plain-text MQTT message ('locked' / 'open') published by
+    the HA automation that watches the Tuya reed switch on the inner
+    locking panel. State file lives in the shared workspace volume so
+    find-dogs.py can answer "they're inside" on an empty full scan.
+    """
+    state = (payload or b'').decode('utf-8', 'replace').strip().lower()
+    if state not in ('locked', 'open'):
+        print(f'find-dogs-mqtt: ignoring dogdoor payload {payload!r}',
+              flush=True)
+        return
+    try:
+        with open(DOOR_STATE_FILE, 'w') as f:
+            json.dump({'state': state, 'ts': time.time()}, f)
+        print(f'find-dogs-mqtt: dogdoor state -> {state}', flush=True)
+    except OSError as e:
+        print(f'find-dogs-mqtt: cannot write {DOOR_STATE_FILE}: {e}',
+              flush=True)
+
+
 def run_scan(device='', silent=False, channel=None):
     """Publish a varied ack (unless silent), run the scan, publish the result.
 
@@ -125,6 +175,14 @@ def run_scan(device='', silent=False, channel=None):
               flush=True)
         return
     try:
+        # Bedtime fast path: dogs are crated (midnight-06:00, 22:00+). No
+        # ack, no scan — just answer. Keeps the 2am ask instant and honest.
+        bed = in_bed_line()
+        if bed:
+            print(f'find-dogs-mqtt: bedtime fast path — publishing result '
+                  f'({result_topic}): {bed}', flush=True)
+            _client.publish(result_topic, bed, qos=0, retain=False)
+            return
         if not silent:
             ack = compose_ack()
             print(f'find-dogs-mqtt: publishing ack ({ack_topic}): {ack}',
@@ -164,11 +222,16 @@ def run_scan(device='', silent=False, channel=None):
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     print(f'find-dogs-mqtt: connected (rc={reason_code}), '
-          f'subscribing {TRIGGER_TOPIC} + {TRIGGER_TOPIC}/+', flush=True)
-    client.subscribe([(TRIGGER_TOPIC, 0), (f'{TRIGGER_TOPIC}/+', 0)])
+          f'subscribing {TRIGGER_TOPIC} + {TRIGGER_TOPIC}/+ + {DOOR_TOPIC}',
+          flush=True)
+    client.subscribe([(TRIGGER_TOPIC, 0), (f'{TRIGGER_TOPIC}/+', 0),
+                      (DOOR_TOPIC, 0)])
 
 
 def on_message(client, userdata, msg):
+    if msg.topic == DOOR_TOPIC:
+        write_door_state(msg.payload)
+        return
     device = _device_from_topic(msg.topic)
     silent, channel = _parse_payload(msg.payload)
     print(f'find-dogs-mqtt: trigger received ({msg.topic}): {msg.payload!r}'

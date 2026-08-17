@@ -11,6 +11,8 @@ Usage (inside the notifier container):
     python3 /app/find-dogs.py scan 1,14,12     # explicit channel ids
     python3 /app/find-dogs.py montage          # labeled grid of ALL NVR
                                                # channels (identification aid)
+    python3 /app/find-dogs.py inbed            # print the 'in bed' line at
+                                               # bedtime (overnight fast path)
 
 Config: "find_dogs" section in dogwatch-notify.config.json (gitignored):
     "find_dogs": {
@@ -64,6 +66,22 @@ FONT_PATH = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
 
 GRAB_TIMEOUT = 25          # per ffmpeg attempt
 GRAB_ATTEMPTS = 3          # retries on grey/corrupt frame
+
+# Dog-door state: written by find-dogs-mqtt.py from the dogwatch/dogdoor
+# MQTT topic (HA automation publishes 'locked'/'open' from the Tuya reed
+# switch on the inner locking panel). Read at scan time so a full sweep
+# that finds nothing can say "they're inside" when the door is open.
+DOOR_STATE_FILE = os.environ.get(
+    'DOGWATCH_DOOR_STATE_FILE', '/app/workspace/dogdoor.state')
+
+# Bedtime gates (local time): dogs are in their crates overnight. Michael's
+# rules: never outside before 6am; bedtime between 20:00-22:00 when they are
+# crated and the door is locked again. So midnight-06:00 and 22:00+ are a
+# no-scan fast path; 20:00-21:59 with a locked door is a soft "inside for the
+# night" inference on an empty full scan.
+IN_BED_HOURS = (0, 6)      # hour < 6 -> in bed, no scan
+BEDTIME_START_HOUR = 20    # 20:00+ with door locked -> likely inside/crated
+BEDTIME_END_HOUR = 22      # 22:00+ -> crated, hard in-bed gate
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +502,60 @@ def compose_ack_line():
     return _deepseek_line(prompt) or 'On it, scanning the yard for the dogs.'
 
 
+def compose_in_bed_line():
+    """DeepSeek composes a varied 'dogs are in bed / crates' line."""
+    prompt = (
+        'Write ONE short, warm, natural sentence telling the owner that '
+        'their dogs are in bed, in their crates for the night. Speak '
+        'plainly, like a helpful assistant — no emojis, no markdown, no '
+        'quotes, no introductory words. Vary the phrasing and structure '
+        'each time; do not always start with "They". Keep it under 10 '
+        'words.\n'
+        'The dogs are in their crates for the night.'
+    )
+    return _deepseek_line(prompt) or 'They are in their crates for the night.'
+
+
+def compose_inside_line():
+    """DeepSeek composes a varied 'door open -> they must be inside' line."""
+    prompt = (
+        'Write ONE short, warm, natural sentence telling the owner that '
+        'the dogs are not in the yard and, since the doggy door is open, '
+        'they must have come inside the house. Speak plainly, like a '
+        'helpful assistant — no emojis, no markdown, no quotes, no '
+        'introductory words. Vary the phrasing and structure each time; '
+        'do not always start with "They". Keep it under 14 words.\n'
+        'The doggy door is open, so they must be inside.'
+    )
+    return _deepseek_line(prompt) or 'The doggy door is open — they must be inside.'
+
+
+def load_door_state():
+    """Return 'open' / 'locked' / '' (unknown) from the door state file.
+
+    Written by find-dogs-mqtt.py whenever dogwatch/dogdoor arrives on MQTT
+    (HA automation publishes 'locked'/'open' from the Tuya reed switch on
+    the doggy-door inner locking panel). Missing/unreadable file -> ''.
+    """
+    try:
+        with open(DOOR_STATE_FILE) as f:
+            return json.load(f).get('state', '')
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ''
+
+
+def bedtime_gate():
+    """Return (in_bed, line) — true overnight (midnight-06:00 and 22:00+).
+
+    When true the caller should skip the camera scan entirely and just
+    answer with the in-bed line (dogs are crated, no point scanning).
+    """
+    hour = int(time.strftime('%H', time.localtime()))
+    if hour < IN_BED_HOURS[1] or hour >= BEDTIME_END_HOUR:
+        return True, compose_in_bed_line()
+    return False, ''
+
+
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
@@ -585,6 +657,24 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
     first camera that has one is enough). Remaining cameras are skipped
     and the summary notes the early stop.
     """
+    # Overnight fast path: dogs are crated (midnight-06:00 and 22:00+).
+    # Answer directly — no point scanning an empty yard, and this keeps the
+    # 2am "where are the dogs" question instant.
+    in_bed, bed_line = bedtime_gate()
+    if in_bed:
+        ok = tg_send(bot_token, chat_id, f'🌙 {bed_line}')
+        print('summary sent:', ok)
+        if summary_file:
+            try:
+                with open(summary_file, 'w') as f:
+                    f.write(bed_line)
+                print(f'summary written: {summary_file}')
+            except OSError as e:
+                print(f'ERROR: cannot write summary file {summary_file}: {e}',
+                      file=sys.stderr)
+        print('voice summary:', bed_line)
+        return 0 if ok else 1
+
     names = resolve_names(fd, nvr)
     if not channel_ids:
         channel_ids = fd.get('channels', [])
@@ -628,6 +718,7 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
             else:
                 uncertain.append((ch, name))
 
+        door = load_door_state()
         lines = [f'🔍 Find the dogs — {scanned} cameras scanned']
         if early_exit:
             lines.append('⏩ Stopped early: dogs found')
@@ -646,7 +737,11 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
             lines.append('📡 No signal: '
                          + ', '.join(f'{n} (ch{c})' for c, n in failed))
         if not found:
-            lines.append('\nNo dogs found.')
+            if door == 'open' and len(channel_ids) != 1:
+                lines.append('\nNo dogs found in the yard — doggy door is '
+                             'open, they may be inside.')
+            else:
+                lines.append('\nNo dogs found.')
         ok = tg_send(bot_token, chat_id, '\n'.join(lines))
         print('summary sent:', ok)
 
@@ -665,10 +760,13 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
                 voice_summary = ('Found the dogs at the '
                                  + ', the '.join(n for n, _ in spots) + '.')
         else:
-            loc = ''
-            if len(channel_ids) == 1 and channel_ids[0] not in [f[0] for f in failed]:
-                loc = vnames.get(channel_ids[0], names.get(channel_ids[0], ''))
-            voice_summary = compose_no_dogs_line(loc)
+            if door == 'open' and len(channel_ids) != 1:
+                voice_summary = compose_inside_line()
+            else:
+                loc = ''
+                if len(channel_ids) == 1 and channel_ids[0] not in [f[0] for f in failed]:
+                    loc = vnames.get(channel_ids[0], names.get(channel_ids[0], ''))
+                voice_summary = compose_no_dogs_line(loc)
         if summary_file:
             try:
                 with open(summary_file, 'w') as f:
@@ -700,6 +798,15 @@ def main():
         # Alexa/HA voice path — called by find-dogs-mqtt.py before the scan
         # so the Echo can acknowledge while the cameras are being scanned.
         print(compose_ack_line())
+        return 0
+
+    if mode == 'inbed':
+        # Overnight fast-path check for find-dogs-mqtt.py: prints the
+        # composed 'in bed' line when it's bedtime (dogs are crated), else
+        # nothing. The listener uses this to skip the scan entirely.
+        in_bed, line = bedtime_gate()
+        if in_bed:
+            print(line)
         return 0
 
     if mode != 'scan':

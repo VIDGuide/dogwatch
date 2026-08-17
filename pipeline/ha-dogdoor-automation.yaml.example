@@ -1,0 +1,29 @@
+# DogWatch — doggy-door panel state → MQTT
+# -----------------------------------------
+# Paste this into Home Assistant (Settings → Automations → New → ⋮ → Edit
+# in YAML) once the Tuya reed switch is paired. It publishes the locking
+# panel state to `dogwatch/dogdoor` (retained), which the notifier's
+# find-dogs listener persists and uses to answer "they're inside" when a
+# full scan finds nothing while the door is open.
+#
+# Adjust `binary_sensor.dog_door_panel` to the entity the Tuya contact
+# sensor actually creates. If the on/off sense is inverted (panel inserted
+# reports "on"), flip the payload mapping below.
+#
+# Tuya contact sensors: "on" = contact open (panel removed → doggy door
+# open), "off" = contact closed (panel inserted → locked). Verify against
+# the real sensor; the mapping is the only thing to get wrong here.
+
+alias: "DogWatch — publish doggy door state"
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.dog_door_panel   # ← your Tuya sensor entity
+    to: ["on", "off"]
+conditions: []
+actions:
+  - action: mqtt.publish
+    data:
+      topic: dogwatch/dogdoor
+      payload: "{{ 'open' if trigger.to_state.state == 'on' else 'locked' }}"
+      retain: true
+mode: restart
