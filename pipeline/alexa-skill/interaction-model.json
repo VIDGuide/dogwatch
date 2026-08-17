@@ -1,7 +1,7 @@
 {
   "interactionModel": {
     "languageModel": {
-      "invocationName": "dog finder",
+      "invocationName": "dog watch",
       "intents": [
         {
           "name": "AMAZON.CancelIntent",
@@ -65,84 +65,123 @@
               "id": "back_gate",
               "name": {
                 "value": "back gate",
-                "synonyms": ["back gate", "rear gate", "gate"]
+                "synonyms": [
+                  "back gate",
+                  "rear gate",
+                  "gate"
+                ]
               }
             },
             {
               "id": "back_door",
               "name": {
                 "value": "back door",
-                "synonyms": ["back door", "rear west", "rear west wide"]
+                "synonyms": [
+                  "back door",
+                  "rear west",
+                  "rear west wide"
+                ]
               }
             },
             {
               "id": "rear_fence",
               "name": {
                 "value": "rear fence",
-                "synonyms": ["rear fence", "garage rear", "fence"]
+                "synonyms": [
+                  "rear fence",
+                  "garage rear",
+                  "fence"
+                ]
               }
             },
             {
               "id": "clothes_line",
               "name": {
                 "value": "clothes line",
-                "synonyms": ["clothes line", "clothesline", "rear east"]
+                "synonyms": [
+                  "clothes line",
+                  "clothesline",
+                  "rear east"
+                ]
               }
             },
             {
               "id": "side_run",
               "name": {
                 "value": "side run",
-                "synonyms": ["side run", "side east", "side yard", "side"]
+                "synonyms": [
+                  "side run",
+                  "side east",
+                  "side yard",
+                  "side"
+                ]
               }
             },
             {
               "id": "carport",
               "name": {
                 "value": "carport",
-                "synonyms": ["carport"]
+                "synonyms": [
+                  "carport"
+                ]
               }
             },
             {
               "id": "front_driveway",
               "name": {
                 "value": "front driveway",
-                "synonyms": ["front driveway", "driveway"]
+                "synonyms": [
+                  "front driveway",
+                  "driveway"
+                ]
               }
             },
             {
               "id": "rear_shed",
               "name": {
                 "value": "rear shed",
-                "synonyms": ["rear shed", "shed"]
+                "synonyms": [
+                  "rear shed",
+                  "shed"
+                ]
               }
             },
             {
               "id": "pool",
               "name": {
                 "value": "pool",
-                "synonyms": ["pool", "pool area"]
+                "synonyms": [
+                  "pool",
+                  "pool area"
+                ]
               }
             },
             {
               "id": "front_door",
               "name": {
                 "value": "front door",
-                "synonyms": ["front door"]
+                "synonyms": [
+                  "front door"
+                ]
               }
             },
             {
               "id": "toy_area",
               "name": {
                 "value": "toy area",
-                "synonyms": ["toy area"]
+                "synonyms": [
+                  "toy area"
+                ]
               }
             },
             {
               "id": "william_st",
               "name": {
                 "value": "william street",
-                "synonyms": ["william street", "william st"]
+                "synonyms": [
+                  "william street",
+                  "william st"
+                ]
               }
             }
           ]
