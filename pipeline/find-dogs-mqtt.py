@@ -19,10 +19,12 @@ corresponding <device>-suffixed topics. A bare trigger (no suffix) keeps the
 original behaviour — ack/result on the base topics, announced on the default
 group of Echos.
 
-Ack suppression: a trigger payload of "silent" (or JSON {"ack": false})
-skips the ack publish — used by the Alexa custom-skill webhook, where the
-skill itself speaks the "on it, scanning the yard" line immediately and a
-second HA ack would double-announce. The result is always published.
+Payloads:
+  "go"                      — full scan, publish the DeepSeek ack
+  "silent"                  — full scan, skip the ack (skill speaks it)
+  {"ack": false}            — same as "silent" (JSON form)
+  {"ack": false, "channel": N} — scan ONLY camera N, skip the ack
+                                 (Alexa "check for dogs at <camera>")
 
 MQTT env (same as the notifier): MQTT_HOST / MQTT_PORT / MQTT_TOPIC.
 Result summary file lives in the shared workspace volume so the HA-side
@@ -62,20 +64,31 @@ def _device_from_topic(topic):
     return ''
 
 
-def _is_silent(payload):
-    """True when the trigger asks for no ack publish (skill speaks it).
+def _parse_payload(payload):
+    """Return (silent, channel) from a trigger payload.
 
-    Accepts the literal string 'silent' or JSON {"ack": false}.
+    silent  — True when the ack should be skipped (the skill speaks it).
+    channel — int camera id when only that camera should be scanned,
+              else None (full scan).
     """
     if isinstance(payload, bytes):
         payload = payload.decode('utf-8', 'replace')
     if payload == 'silent':
-        return True
+        return True, None
     try:
         d = json.loads(payload)
-        return isinstance(d, dict) and d.get('ack') is False
+        if isinstance(d, dict):
+            silent = d.get('ack') is False
+            channel = d.get('channel')
+            if channel is not None:
+                try:
+                    channel = int(channel)
+                except (TypeError, ValueError):
+                    channel = None
+            return silent, channel
     except (ValueError, TypeError):
-        return False
+        pass
+    return False, None
 
 
 def compose_ack():
@@ -96,12 +109,13 @@ def compose_ack():
     return 'On it, scanning the yard for the dogs.'
 
 
-def run_scan(device='', silent=False):
+def run_scan(device='', silent=False, channel=None):
     """Publish a varied ack (unless silent), run the scan, publish the result.
 
     With a device suffix the ack/result go to <topic>/<device> so HA can
     announce on the invoking Echo; without one they use the base topics
-    (default group announce).
+    (default group announce). With a channel id, only that camera is
+    scanned (Alexa "check for dogs at <camera>").
     """
     suffix = f'/{device}' if device else ''
     ack_topic = ACK_TOPIC + suffix
@@ -119,12 +133,13 @@ def run_scan(device='', silent=False):
         else:
             print('find-dogs-mqtt: silent trigger — ack suppressed '
                   '(skill speaks it)', flush=True)
-        print('find-dogs-mqtt: running scan...', flush=True)
-        subprocess.run(
-            ['python3', '/app/find-dogs.py', 'scan',
-             '--summary-file', SUMMARY_FILE],
-            timeout=600,
-        )
+        scan_args = ['python3', '/app/find-dogs.py', 'scan']
+        if channel:
+            scan_args.append(str(channel))
+        scan_args += ['--summary-file', SUMMARY_FILE]
+        scope = f'channel {channel}' if channel else 'all channels'
+        print(f'find-dogs-mqtt: running scan ({scope})...', flush=True)
+        subprocess.run(scan_args, timeout=600)
         try:
             with open(SUMMARY_FILE) as f:
                 summary = f.read().strip()
@@ -155,11 +170,12 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 def on_message(client, userdata, msg):
     device = _device_from_topic(msg.topic)
-    silent = _is_silent(msg.payload)
+    silent, channel = _parse_payload(msg.payload)
     print(f'find-dogs-mqtt: trigger received ({msg.topic}): {msg.payload!r}'
           + (f' [device={device}]' if device else '')
-          + (' [silent]' if silent else ''), flush=True)
-    threading.Thread(target=run_scan, args=(device, silent),
+          + (' [silent]' if silent else '')
+          + (f' [channel={channel}]' if channel else ''), flush=True)
+    threading.Thread(target=run_scan, args=(device, silent, channel),
                      daemon=True).start()
 
 

@@ -4,6 +4,16 @@ The one Alexa path that knows **which Echo** invoked it. Custom skills receive
 the invoking device's `deviceId` (routines and the HA Cloud Smart Home skill
 don't), so we can announce the find-dogs result on exactly that Echo.
 
+## Intents
+
+- **FindDogsIntent** — "where are the dogs" → full scan (preferred camera
+  order, early exit when found).
+- **CheckCameraIntent** — "check for the dogs at the back gate" → scans ONLY
+  that camera (slot `camera`, type `CAMERA`). The skill resolves the name to
+  an NVR channel and sends `{"deviceId": ..., "channel": N}` to the webhook;
+  HA publishes `{"ack": false, "channel": N}` on the trigger topic and the
+  notifier scans just that channel. Unknown camera → full-scan fallback.
+
 ## Architecture
 
 ```

@@ -441,8 +441,24 @@ def compose_voice_line(spots, keys):
     return _deepseek_line(prompt)
 
 
-def compose_no_dogs_line():
-    """DeepSeek composes a varied 'no dogs found' line (canned fallback)."""
+def compose_no_dogs_line(location=''):
+    """DeepSeek composes a varied 'no dogs found' line (canned fallback).
+
+    location: optional voice name (e.g. 'Back Gate') when only that camera
+    was scanned — composes 'no dogs at the back gate right now' instead of
+    the whole-yard phrasing.
+    """
+    if location:
+        prompt = (
+            'Write ONE short, warm, natural sentence telling the owner that '
+            f'no dogs were found at {location} right now. Speak plainly, '
+            'like a helpful assistant — no emojis, no markdown, no quotes, '
+            'no introductory words. Vary the phrasing and structure each '
+            'time; do not always start with "No". Keep it under 10 words.\n'
+            f'No dogs at {location} right now.'
+        )
+        line = _deepseek_line(prompt)
+        return line or f'No dogs at {location} right now.'
     prompt = (
         'Write ONE short, warm, natural sentence telling the owner that no '
         'dogs were found anywhere in the yard this time. Speak plainly, '
@@ -649,7 +665,10 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
                 voice_summary = ('Found the dogs at the '
                                  + ', the '.join(n for n, _ in spots) + '.')
         else:
-            voice_summary = compose_no_dogs_line()
+            loc = ''
+            if len(channel_ids) == 1 and channel_ids[0] not in [f[0] for f in failed]:
+                loc = vnames.get(channel_ids[0], names.get(channel_ids[0], ''))
+            voice_summary = compose_no_dogs_line(loc)
         if summary_file:
             try:
                 with open(summary_file, 'w') as f:
@@ -691,16 +710,21 @@ def main():
     channel_ids = []
     summary_file = None
     rest = args[1:]
-    if rest and rest[0] == '--summary-file' and len(rest) > 1:
-        summary_file = rest[1]
-        rest = rest[2:]
-    if rest:
-        for part in rest[0].split(','):
+    # Parse --summary-file wherever it appears (the listener passes it AFTER
+    # the channel id: 'scan 14 --summary-file <path>').
+    i = 0
+    while i < len(rest):
+        if rest[i] == '--summary-file' and i + 1 < len(rest):
+            summary_file = rest[i + 1]
+            i += 2
+            continue
+        for part in rest[i].split(','):
             try:
                 channel_ids.append(int(part.strip()))
             except ValueError:
                 print(f'ERROR: bad channel id {part!r}', file=sys.stderr)
                 return 1
+        i += 1
     keys = load_vision_keys()
     return mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys,
                      summary_file=summary_file)
