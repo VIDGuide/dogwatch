@@ -1,4 +1,4 @@
-# Dog Finder — Alexa custom skill (setup guide)
+# Dog Watch — Alexa custom skill (setup guide)
 
 The one Alexa path that knows **which Echo** invoked it. Custom skills receive
 the invoking device's `deviceId` (routines and the HA Cloud Smart Home skill
@@ -17,8 +17,8 @@ don't), so we can announce the find-dogs result on exactly that Echo.
 ## Architecture
 
 ```
-"Alexa, ask dog finder where are the dogs"
-   -> Echo hears it -> Alexa runs the "Dog Finder" skill
+"Alexa, ask dog watch where are the dogs"
+   -> Echo hears it -> Alexa runs the "Dog Watch" skill
    -> skill backend (this folder) reads event.context.System.device.deviceId
    -> POSTs {"deviceId": "..."} to HA Cloud webhook (fire-and-forget)
    -> speaks an immediate ack ("On it, checking the yard cameras...")
@@ -36,15 +36,15 @@ don't), so we can announce the find-dogs result on exactly that Echo.
    (sign in with the Amazon account that owns the Echos; it's free).
 2. **Alexa Developer Console** — https://developer.amazon.com/alexa/console/ask
    → **Create Skill**.
-3. Skill name: `Dog Finder`. **Type: Custom**. Hosting: **Alexa-hosted
+3. Skill name: `Dog Watch`. **Type: Custom**. Hosting: **Alexa-hosted
    (Node.js)**. Template: **Hello World** (it gives you a working index.js to
    replace). → Create skill.
 4. **Build tab → Interaction Model → JSON Editor**: paste the contents of
-   `interaction-model.json` (sets the invocation name to "dog finder" + the
+   `interaction-model.json` (sets the invocation name to "dog watch" + the
    find-dogs phrases). → **Save Model** → **Build Model**.
 5. **Code tab**: replace `index.js` with the contents of `index.js` from this
    folder. Set the `HA_WEBHOOK_URL` constant (below). → **Deploy**.
-6. **Test** — on any Echo: *"Alexa, ask dog finder where are the dogs"*.
+6. **Test** — on any Echo: *"Alexa, ask dog watch where are the dogs"*.
    The invoking Echo should say the ack, then ~30 s later the result, and no
    OTHER Echo should speak.
 
