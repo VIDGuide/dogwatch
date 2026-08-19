@@ -260,8 +260,13 @@ def bump_stats(key, amount=1):
     """Record a daily counter for the report; capture must never break the
     alert pipeline, so failures are swallowed."""
     try:
+        # stats.py is NOT marked executable in the image, so invoke it via the
+        # interpreter (same pattern as dog-alarm.sh / find-dogs-mqtt.py). Direct
+        # exec silently failed with Permission denied — vision counters never
+        # landed in daily-stats.json (fixed 2026-08-20).
         subprocess.run(
-            [os.environ.get('DW_STATS_SCRIPT', '/app/stats.py'),
+            [sys.executable,
+             os.environ.get('DW_STATS_SCRIPT', '/app/stats.py'),
              'bump', key, str(amount)],
             capture_output=True, timeout=10,
         )
