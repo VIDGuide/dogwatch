@@ -288,7 +288,8 @@ PROMPT = (
     'shadows, garden ornaments, cats, people).\n'
     'If a dog is present, also describe its activity in a short phrase.\n'
     'Respond with STRICT JSON only, no prose, in exactly this form:\n'
-    '{"dog": "YES"|"NO"|"UNCERTAIN", "activity": "short phrase"}\n'
+    '{"dog": "YES"|"NO"|"UNCERTAIN", "activity": "short phrase", '
+    '"description": "short plain-English sentence"}\n'
     'dog = YES if a dog is clearly or very likely present, NO if definitely '
     'not, UNCERTAIN if you cannot tell.\n'
     'activity = 2-5 words describing ONLY the dog(s)\' action or pose (e.g. '
@@ -296,7 +297,12 @@ PROMPT = (
     '"pacing", "playing") when dog is YES; empty string when dog is NO or '
     'UNCERTAIN. Do NOT include any location or place words (no "by", "at", '
     '"near", "on the", "in the yard", furniture, rooms, or camera names) — '
-    'the location is already known from the camera name.'
+    'the location is already known from the camera name.\n'
+    'description = one short natural sentence (max ~15 words) saying exactly '
+    'what is visible in the frame — e.g. "2 dogs digging near the fence", '
+    '"1 dog lying down in the sun", "empty yard, nothing moving", "leaves '
+    'blowing". Location words are fine here. Always fill it in, whatever '
+    'the verdict.'
 )
 
 
@@ -352,10 +358,12 @@ def vision_verify_with(image_path, api_url, model, api_key, label):
 
     dog = 'UNCERTAIN'
     activity = ''
+    description = ''
     try:
         parsed = json.loads(combined)
         dog = str(parsed.get('dog', 'UNCERTAIN')).upper()
         activity = str(parsed.get('activity', '') or '').strip()
+        description = str(parsed.get('description', '') or '').strip()
     except json.JSONDecodeError:
         up = combined.upper()
         for kw in ('YES', 'NO', 'UNCERTAIN'):
@@ -366,19 +374,19 @@ def vision_verify_with(image_path, api_url, model, api_key, label):
               file=sys.stderr)
     if dog not in ('YES', 'NO', 'UNCERTAIN'):
         dog = 'UNCERTAIN'
-    print(f'  vision[{label}] OK: dog={dog} activity={activity!r}',
+    print(f'  vision[{label}] OK: dog={dog} activity={activity!r} desc={description!r}',
           file=sys.stderr)
-    return dog, activity
+    return dog, activity, description
 
 
 def vision_verify(image_path, keys):
     api_url, model, api_key, fb_url, fb_model, fb_key = keys
-    dog, activity = vision_verify_with(image_path, api_url, model, api_key,
-                                       'primary')
+    dog, activity, description = vision_verify_with(
+        image_path, api_url, model, api_key, 'primary')
     if dog is None:
-        dog, activity = vision_verify_with(image_path, fb_url, fb_model,
-                                           fb_key, 'fallback')
-    return dog, activity
+        dog, activity, description = vision_verify_with(
+            image_path, fb_url, fb_model, fb_key, 'fallback')
+    return dog, activity, description
 
 
 def _deepseek_line(prompt):
@@ -710,9 +718,9 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
             if not grab_frame(ch, nvr, p):
                 failed.append((ch, name))
                 continue
-            dog, activity = vision_verify(p, keys)
+            dog, activity, description = vision_verify(p, keys)
             if dog == 'YES':
-                found.append((ch, name, p, activity))
+                found.append((ch, name, p, activity, description))
             elif dog == 'NO':
                 clear.append((ch, name))
             else:
@@ -722,10 +730,11 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
         lines = [f'🔍 Find the dogs — {scanned} cameras scanned']
         if early_exit:
             lines.append('⏩ Stopped early: dogs found')
-        for ch, name, p, activity in found:
+        for ch, name, p, activity, description in found:
             line = f'🐕 {name} (ch{ch})'
-            if activity:
-                line += f' — {activity}'
+            detail = description or activity
+            if detail:
+                line += f' — {detail}'
             lines.append(line)
         if uncertain:
             lines.append('❓ Uncertain: '
@@ -754,7 +763,7 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
         # deterministic template below is the fallback if that call fails.
         vnames = resolve_voice_names(fd, nvr)
         if found:
-            spots = [(vnames.get(ch, n), act) for ch, n, _, act in found]
+            spots = [(vnames.get(ch, n), act) for ch, n, _, act, _ in found]
             voice_summary = compose_voice_line(spots, keys)
             if not voice_summary:
                 voice_summary = ('Found the dogs at the '
@@ -784,7 +793,7 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
                     json.dump({
                         'found': bool(found),
                         'count': len(found),
-                        'channels': [ch for ch, _, _, _ in found],
+                        'channels': [ch for ch, _, _, _, _ in found],
                         'inside': bool(not found and door == 'open'
                                        and len(channel_ids) != 1),
                         'scanned': scanned,
@@ -795,7 +804,7 @@ def mode_scan(channel_ids, cfg, chat_id, bot_token, fd, nvr, keys, summary_file=
                       file=sys.stderr)
         print('voice summary:', voice_summary)
 
-        for ch, name, p, activity in found:
+        for ch, name, p, activity, description in found:
             okp = tg_send_photo(bot_token, chat_id, p,
                                 f'🐕 {name} (ch{ch})')
             print(f'photo ch{ch} sent: {okp}')

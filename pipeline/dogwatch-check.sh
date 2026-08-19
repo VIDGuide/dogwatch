@@ -293,11 +293,17 @@ def vision_verify_with(image_path, api_url, model, api_key, provider_label):
         'the soil, a paw/scratching motion, or freshly disturbed dirt '
         'directly under the dog.\n'
         'Respond with STRICT JSON only, no prose, in exactly this form:\n'
-        '{"dog": "DOG"|"NO_DOG"|"UNCERTAIN", "digging": "YES"|"NO"|"UNCERTAIN"}\n'
+        '{"dog": "DOG"|"NO_DOG"|"UNCERTAIN", "digging": "YES"|"NO"|"UNCERTAIN", '
+        '"description": "short plain-English sentence"}\n'
         'dog = DOG if a dog is clearly or very likely present, NO_DOG if '
         'definitely not, UNCERTAIN if you cannot tell. '
         'digging = YES only if the dog appears to be digging, NO if a dog '
-        'is present but not digging, UNCERTAIN otherwise.'
+        'is present but not digging, UNCERTAIN otherwise.\n'
+        'description = one short natural sentence (max ~15 words) saying '
+        'what is actually in the frame and how many dogs — e.g. "2 dogs '
+        'digging near the fence", "1 dog lying in the sun near the fence", '
+        '"leaves blowing across the yard", "empty yard". Always fill it '
+        'in, whatever the verdict.'
     )
 
     payload = {
@@ -350,12 +356,14 @@ def vision_verify_with(image_path, api_url, model, api_key, provider_label):
 
         dog = 'UNCERTAIN'
         digging = None
+        description = ''
         # Preferred path: strict JSON response.
         try:
             parsed = json.loads(combined)
             dog = str(parsed.get('dog', 'UNCERTAIN')).upper()
             dig_raw = str(parsed.get('digging', 'UNCERTAIN')).upper()
             digging = True if dig_raw == 'YES' else (False if dig_raw == 'NO' else None)
+            description = str(parsed.get('description', '') or '').strip()
         except (json.JSONDecodeError, AttributeError):
             # Fallback: keyword scan if the model didn't return clean JSON.
             up = combined.upper()
@@ -371,10 +379,10 @@ def vision_verify_with(image_path, api_url, model, api_key, provider_label):
 
         if dog not in ('DOG', 'NO_DOG', 'UNCERTAIN'):
             dog = 'UNCERTAIN'
-        print(f'  vision_verify[{provider_label}] OK: dog={dog} digging={digging}', file=sys.stderr)
+        print(f'  vision_verify[{provider_label}] OK: dog={dog} digging={digging} desc={description!r}', file=sys.stderr)
         bump_stats('vision_primary_ok' if provider_label == 'primary'
                    else 'vision_fallback_ok')
-        return {'dog': dog, 'digging': digging}
+        return {'dog': dog, 'digging': digging, 'description': description}
     except Exception as e:
         print(f'  vision_verify[{provider_label}] API error: {e}', file=sys.stderr)
         return None
@@ -504,6 +512,7 @@ for p in pending:
 
     verdict = result['dog']
     digging = result['digging']
+    description = result.get('description', '')
 
     if verdict == 'DOG':
         bump_stats('vision_dog_confirmed')
@@ -512,9 +521,11 @@ for p in pending:
             dig_line = '\n⚠️ *DIGGING detected* — dog appears to be digging!'
         elif digging is False:
             dig_line = '\n🐾 Not digging.'
+        desc_line = f'\n👁️ {description}' if description else ''
         caption = (
             f'✅ *Dog Confirmed* at {p["time"]}\n'
             f'🐕 Type: {event_label}'
+            f'{desc_line}'
             f'{dig_line}'
         )
         tg_send_photo(p['snapshot'], caption)
@@ -531,15 +542,23 @@ for p in pending:
                 print(f'  dog-alarm hook error: {e}', file=sys.stderr)
     elif verdict == 'NO_DOG':
         bump_stats('vision_false_alarm')
-        tg_send(
-            f'❌ *False alarm* — the {event_label} at {p["time"]} '
-            f'was just wind/leaves/shadow.'
-        )
+        if description:
+            tg_send(
+                f'❌ *False alarm* — the {event_label} at {p["time"]} — '
+                f'{description}'
+            )
+        else:
+            tg_send(
+                f'❌ *False alarm* — the {event_label} at {p["time"]} '
+                f'was just wind/leaves/shadow.'
+            )
     elif verdict == 'UNCERTAIN':
         bump_stats('vision_uncertain')
+        desc_suffix = f' ({description})' if description else ''
         tg_send(
             f'❓ *Inconclusive* — vision could not confirm or deny the '
-            f'{event_label} at {p["time"]}. Check the snapshot manually.'
+            f'{event_label} at {p["time"]}.{desc_suffix} '
+            f'Check the snapshot manually.'
         )
 
     time.sleep(1)
