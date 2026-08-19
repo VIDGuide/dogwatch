@@ -411,7 +411,17 @@ def vision_verify(image_path):
     return None
 
 # ---- Collect events ----
+# Dedupe re-triggers: the detector can emit several ON events for the same
+# camera+type within one incident burst (e.g. a dog digging for a minute).
+# Each pending entry gets its own vision follow-up, so a burst previously
+# sent a confirm AND then a contradictory false-alarm for the same incident
+# (seen 2026-08-19: 14:56:40 confirmed digging + siren, then the 14:56:53
+# re-trigger had no stored snapshot → fresh capture after the dog left →
+# NO_DOG → false alarm). Keep only the first event per (camera, label)
+# within the window, preferring whichever has a stored snapshot.
+DEDUPE_WINDOW_SECONDS = float(os.environ.get('DOGWATCH_DEDUPE_WINDOW', '90'))
 pending = []
+seen = {}  # (camera, label) -> index into pending
 
 try:
     with open(STATUS_FILE) as f:
@@ -429,11 +439,34 @@ try:
                     label = 'dog_at_fence' if slug == 'dog_at_fence' else 'digging' if slug == 'digging' else slug
 
                     ws_path = ''
-                    if snap and os.path.exists(snap):
-                        basename = f'dogwatch_{int(e["ts"])}.jpg'
-                        ws_path = os.path.join(WORKSPACE_DIR, basename)
-                        shutil.copy2(snap, ws_path)
-                    else:
+                    key = (e.get('camera', 'camera'), label)
+                    has_stored = bool(snap and os.path.exists(snap))
+                    # Same incident burst? Only the first entry per
+                    # (camera, label) gets a follow-up; a later repeat must
+                    # have a stored snapshot to REPLACE a snapshot-less first
+                    # entry (prefer the real frame over a fresh capture).
+                    if key in seen:
+                        existing = pending[seen[key]]
+                        if e['ts'] - existing['ts'] < DEDUPE_WINDOW_SECONDS:
+                            if has_stored and not existing['snapshot']:
+                                basename = f'dogwatch_{int(e["ts"])}.jpg'
+                                ws_path = os.path.join(WORKSPACE_DIR, basename)
+                                shutil.copy2(snap, ws_path)
+                                pending[seen[key]] = {
+                                    'ts': e['ts'],
+                                    'type': label,
+                                    'time': ts_local,
+                                    'snapshot': ws_path,
+                                    'bbox': e.get('bbox'),
+                                    'score': e.get('score', 0.0),
+                                    'camera': e.get('camera', 'camera'),
+                                }
+                            else:
+                                print(f'  dedupe: skip repeat {label} at '
+                                      f'{ts_local} (same incident as '
+                                      f'{existing["time"]})', file=sys.stderr)
+                            continue
+                    if not has_stored:
                         # No stored snapshot (debounce/race/cleanup) — try a
                         # fresh frame at check time so vision still runs.
                         fresh = capture_fresh(e.get('camera', 'camera'))
@@ -441,15 +474,22 @@ try:
                             ws_path = fresh
                             print(f'  fresh capture for {label} at {ts_local}',
                                   file=sys.stderr)
+                    else:
+                        basename = f'dogwatch_{int(e["ts"])}.jpg'
+                        ws_path = os.path.join(WORKSPACE_DIR, basename)
+                        shutil.copy2(snap, ws_path)
 
-                    pending.append({
+                    entry = {
+                        'ts': e['ts'],
                         'type': label,
                         'time': ts_local,
                         'snapshot': ws_path,
                         'bbox': e.get('bbox'),
                         'score': e.get('score', 0.0),
                         'camera': e.get('camera', 'camera'),
-                    })
+                    }
+                    seen[key] = len(pending)
+                    pending.append(entry)
             except (json.JSONDecodeError, KeyError):
                 pass
 except FileNotFoundError:
