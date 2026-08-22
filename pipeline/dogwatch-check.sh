@@ -429,6 +429,52 @@ def vision_verify(image_path):
     print('  vision_verify: primary failed and no fallback key configured', file=sys.stderr)
     return None
 
+
+# After the siren sounds on a digging event, re-check the same camera a
+# short while later to see whether the dog was actually distracted
+# (closed-loop deterrent). 0 disables the follow-up.
+ALARM_FOLLOWUP_SECONDS = float(os.environ.get('DOGWATCH_ALARM_FOLLOWUP_SECONDS', '30'))
+
+
+def alarm_followup(p):
+    """Re-check the camera ~N seconds after a siren to verify the dog was
+    distracted. Sends one follow-up photo + verdict, bumps daily stats."""
+    delay = ALARM_FOLLOWUP_SECONDS
+    if delay <= 0:
+        return
+    time.sleep(delay)
+    bump_stats('alarm_followups')
+    snap = capture_fresh(p.get('camera', 'camera'))
+    if not snap:
+        tg_send('⚠️ *Siren follow-up* — could not grab a fresh frame to '
+                'check whether the dog was distracted.')
+        bump_stats('alarm_followup_uncertain')
+        return
+    result = vision_verify(snap)
+    if result is None:
+        tg_send('⚠️ *Siren follow-up* — vision check failed on the fresh '
+                'frame; could not confirm the dog was distracted.')
+        bump_stats('alarm_followup_uncertain')
+        return
+    dog = result['dog']
+    digging = result['digging']
+    description = result.get('description', '')
+    if dog == 'DOG' and digging is True:
+        bump_stats('alarm_followup_still_digging')
+        head = '🔊 *Siren follow-up* — dog is *still digging*!'
+    elif dog == 'DOG':
+        bump_stats('alarm_followup_present')
+        head = '🔊 *Siren follow-up* — dog still at the fence, not digging.'
+    elif dog == 'NO_DOG':
+        bump_stats('alarm_followup_clear')
+        head = '✅ *Siren follow-up* — dog has left the fence — siren worked.'
+    else:
+        bump_stats('alarm_followup_uncertain')
+        head = '❓ *Siren follow-up* — could not tell from the fresh frame.'
+    caption = f'{head}\n👁️ {description}' if description else head
+    tg_send_photo(snap, caption)
+
+
 # ---- Collect events ----
 # Dedupe re-triggers: the detector can emit several ON events for the same
 # camera+type within one incident burst (e.g. a dog digging for a minute).
@@ -608,10 +654,17 @@ for p in pending:
         # interval, enabled flag) and raises the event back to the chat.
         if digging is True and os.path.exists(os.environ.get('DW_ALARM_SCRIPT', '')):
             reason = f'vision confirmed digging — {event_label} at {p["time"]}'
+            rc = None
             try:
-                subprocess.run([os.environ['DW_ALARM_SCRIPT'], reason], timeout=60)
+                rc = subprocess.run(
+                    [os.environ['DW_ALARM_SCRIPT'], reason], timeout=60
+                ).returncode
             except Exception as e:
                 print(f'  dog-alarm hook error: {e}', file=sys.stderr)
+            if rc == 0:
+                # Siren actually sounded — re-check the camera shortly after
+                # to see whether the dog was distracted (closed loop).
+                alarm_followup(p)
     elif verdict == 'NO_DOG':
         bump_stats('vision_false_alarm')
         if description:
