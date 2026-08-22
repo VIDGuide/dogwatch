@@ -10,9 +10,20 @@
 STATUS_FILE="/tmp/dogwatch-events.jsonl"
 # GNU date syntax (-d) — this script targets Linux cron/systemd hosts and
 # will not run as-is on macOS/BSD (which needs `date -v-4M +%s` instead).
-CUTOFF=$(date +%s -d "4 minutes ago")
+# Lookback must EXCEED the loop period (300s) + processing slack. With a
+# 4-min cutoff and a 5-min loop, events landing in the last ~1 min of a
+# cycle window aged past the cutoff before the next cycle read them and
+# were SILENTLY dropped — no vision, no siren, no follow-up message
+# (seen 2026-08-22 15:28:38 digging). 7 min = 300s loop + 120s slack.
+CUTOFF=$(date +%s -d "7 minutes ago")
 WORKSPACE_SNAP_DIR="${DOGWATCH_WORKSPACE_DIR:-$HOME/.openclaw/workspace/dogwatch_snaps}"
 MARKER_FILE="/tmp/dogwatch-pending.jsonl"
+# Watermark of the newest event ts already seen — prevents the dead-zone
+# drop above AND re-processing (a longer lookback alone would re-process
+# old events on later cycles). Lives in /tmp next to the events file so
+# both reset together on container recreate.
+LAST_TS_FILE="/tmp/dogwatch-last-ts"
+LAST_TS=$(cat "$LAST_TS_FILE" 2>/dev/null || echo 0)
 SECRETS_FILE="$HOME/.openclaw/secrets.json"
 # Chat id is loaded from (in order): DOGWATCH_CHAT_ID env, the notify config
 # file's "chat_id", so it is not hardcoded in this (publicly-committed) script.
@@ -74,6 +85,8 @@ fi
 
 # Pass shell vars to Python as env vars so we don't fight with heredoc quoting
 export DW_CUTOFF="$CUTOFF"
+export DW_LAST_TS="$LAST_TS"
+export DW_LAST_TS_FILE="$LAST_TS_FILE"
 export DW_WORKSPACE_DIR="$WORKSPACE_SNAP_DIR"
 export DW_MARKER_FILE="$MARKER_FILE"
 export DW_SECRETS_FILE="$SECRETS_FILE"
@@ -92,6 +105,7 @@ python3 << 'PYEOF'
 import json, time, sys, shutil, os, subprocess, urllib.request, urllib.parse, base64
 
 CUTOFF = float(os.environ['DW_CUTOFF'])
+LAST_TS = float(os.environ.get('DW_LAST_TS', '0') or '0')
 WORKSPACE_DIR = os.environ['DW_WORKSPACE_DIR']
 MARKER_FILE = os.environ['DW_MARKER_FILE']
 SECRETS_FILE = os.path.expanduser(os.environ['DW_SECRETS_FILE'])
@@ -428,6 +442,17 @@ DEDUPE_WINDOW_SECONDS = float(os.environ.get('DOGWATCH_DEDUPE_WINDOW', '90'))
 pending = []
 seen = {}  # (camera, label) -> index into pending
 
+
+def advance_watermark():
+    """Persist the newest event ts seen so future cycles skip it."""
+    if max_seen > LAST_TS:
+        try:
+            with open(os.environ['DW_LAST_TS_FILE'], 'w') as f:
+                f.write(f'{max_seen:.6f}\n')
+        except Exception:
+            pass
+
+max_seen = 0.0
 try:
     with open(STATUS_FILE) as f:
         for line in f:
@@ -436,7 +461,8 @@ try:
                 continue
             try:
                 e = json.loads(line)
-                if e['ts'] >= CUTOFF and e['state'] == 'ON':
+                max_seen = max(max_seen, e['ts'])
+                if e['ts'] > LAST_TS and e['ts'] >= CUTOFF and e['state'] == 'ON':
                     ts_local = time.strftime('%H:%M:%S', time.localtime(e['ts']))
                     topic = e['topic']
                     slug = topic.split('/')[-1]
@@ -501,6 +527,7 @@ except FileNotFoundError:
     pass
 
 if not pending:
+    advance_watermark()
     sys.exit(0)
 
 # Write marker file (handy for debugging / external tools)
@@ -607,5 +634,7 @@ for p in pending:
         )
 
     time.sleep(1)
+
+advance_watermark()
 
 PYEOF
