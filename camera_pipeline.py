@@ -30,6 +30,7 @@ import numpy as np
 import requests
 from requests.auth import HTTPDigestAuth
 
+from async_writer import AsyncWriter
 from behavior import BehaviorMonitor
 from debug_capture import DebugCapture
 from event_store import EventStore
@@ -186,8 +187,16 @@ class CameraPipeline:
         # Static bbox suppression: if the same bbox region fires repeatedly
         # at the same position without any spatial movement (no dog ever
         # "arrived"), suppress it as a known static false-positive element.
-        # See static_suppressor.py for the full design rationale.
-        self.static_suppressor = StaticSuppressor(cfg)
+        # See static_suppressor.py for the full design rationale, including why
+        # 'digging' is never suppressed.
+        self.static_suppressor = StaticSuppressor(cfg, camera_name=name)
+
+        # Background writer for JPEG encodes, debug captures and SQLite inserts.
+        # These all used to run synchronously inside tick(), so an event stalled
+        # the detection loop exactly when frames mattered most. See
+        # async_writer.py.
+        self.writer = AsyncWriter(name=name,
+                                  maxsize=int(cfg.get("write_queue_size", 256)))
 
     def _apply_crop(self, frame):
         if self.crop:
@@ -348,6 +357,10 @@ class CameraPipeline:
 
         # Crop to region of interest before detection (zoom effect).
         roi = self._apply_crop(frame)
+        # Freshly allocated every tick, and never mutated afterwards. Both
+        # MotionGate and BehaviorMonitor retain a reference to it as their next
+        # comparison baseline instead of copying, so do not convert this to a
+        # reused `dst=` buffer — see MotionGate.should_detect's contract note.
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
         # Quality check FIRST, before the motion gate.
@@ -405,7 +418,11 @@ class CameraPipeline:
             # Static suppression: if this bbox has been firing repeatedly
             # at the same position with no movement, it's a structural
             # false positive (beam, railing, pipe). Suppress it.
-            if self.static_suppressor.should_suppress(bbox, t0):
+            #
+            # etype is passed so protected event types ('digging' by default)
+            # are never dropped — see static_suppressor.py for why that
+            # asymmetry matters.
+            if self.static_suppressor.should_suppress(bbox, t0, event_type=etype):
                 continue
 
             payload = {
@@ -421,15 +438,21 @@ class CameraPipeline:
                 self.pub.event(etype, payload, auto_off=120)
             stamp = time.strftime("%H:%M:%S")
 
-            # Persist to SQLite for easy post-hoc querying without log grep.
-            self.event_store.log_event(
+            # Everything below is queued to the background writer rather than
+            # run inline: a full-res JPEG encode plus a SQLite commit inside a
+            # 200ms fleet-wide loop budget meant firing an event caused dropped
+            # frames. Ordering within the queue is preserved (single worker), so
+            # the DB row and the clip for one event stay consistent.
+            self.writer.submit(
+                self.event_store.log_event,
                 event_type=etype, track_id=tid, score=score,
                 bbox=bbox, frame_w=self.w, frame_h=self.h, ts=t0,
                 metadata={"motion_fraction": self.motion_gate.motion_fraction},
+                label="event_store.log_event",
             )
             if etype == "digging":
                 fn = os.path.join(self.clip_dir, f"dig_{int(t0)}_{tid}.jpg")
-                cv2.imwrite(fn, frame)
+                self.writer.submit(cv2.imwrite, fn, frame, label="clip_imwrite")
                 print(f"[{stamp}] {self.name}: DIGGING  track {tid} score={score:.2f} -> {fn}")
             else:
                 print(f"[{stamp}] {self.name}: {etype}  track {tid} score={score:.2f}")
@@ -437,7 +460,12 @@ class CameraPipeline:
             # Optional debug archive: low-res = exactly what the model saw
             # (post-crop ROI), high-res = the full raw frame, for offline
             # review of events like false positives. No-op unless enabled.
-            self.debug_capture.save(etype, tid, t0, roi, high_res_frame=frame)
+            #
+            # roi is a *view* into frame, and neither is mutated after this
+            # point (grab.read() returns a fresh copy each tick), so it is safe
+            # to hand both to the writer thread without copying.
+            self.writer.submit(self.debug_capture.save, etype, tid, t0, roi,
+                               high_res_frame=frame, label="debug_capture.save")
 
             # Send annotated snapshot once per tick in a background thread.
             if self.pub and not snapshot_sent:
@@ -450,7 +478,27 @@ class CameraPipeline:
 
         # Sweep old debug captures at most once per hour rather than on
         # every tick (a directory listing per frame at several fps would be
-        # wasteful for what's a background housekeeping task).
+        # wasteful for what's a background housekeeping task). Queued to the
+        # writer thread too: a directory with tens of thousands of files makes
+        # the listdir+getmtime+remove loop slow enough to stall the loop.
         if t0 - self._last_debug_cleanup > 3600:
             self._last_debug_cleanup = t0
-            self.debug_capture.cleanup()
+            self.writer.submit(self.debug_capture.cleanup,
+                               label="debug_capture.cleanup")
+
+    def close(self):
+        """Release this camera's resources. Best-effort; safe to call twice."""
+        try:
+            self.grab.stop()
+        except Exception:
+            pass
+        try:
+            # Drain queued writes so an event fired just before shutdown still
+            # lands on disk / in the DB.
+            self.writer.stop(timeout=5.0)
+        except Exception:
+            pass
+        try:
+            self.event_store.close()
+        except Exception:
+            pass

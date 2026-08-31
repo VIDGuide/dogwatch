@@ -109,13 +109,15 @@ class FakeInterp:
         self.invocations += 1
 
 
-def make_detector(score, instance_threshold=0.4):
+def make_detector(score, instance_threshold=0.4, class_id=17):
     """Build a DogDetector around a stub interpreter, no TPU involved."""
     det = detector.DogDetector.__new__(detector.DogDetector)
-    det.interp = FakeInterp(score)
+    det.interp = FakeInterp(score, class_id=class_id)
     det.score_threshold = instance_threshold
     det.labels = {17: "dog"}
     det.target_ids = {17}
+    # Mirrors __init__: the output layout is resolved once at load time.
+    det._output_layout = detector.resolve_output_layout(det.interp)
     return det
 
 
@@ -163,8 +165,7 @@ class TestDetectThresholdOverride:
         assert len(det.detect(FRAME, score_threshold=0.55)) == 1
 
     def test_non_target_class_still_filtered_regardless_of_threshold(self):
-        det = make_detector(score=0.99)
-        det.interp = FakeInterp(0.99, class_id=1)  # person, not dog
+        det = make_detector(score=0.99, class_id=1)  # person, not dog
         assert det.detect(FRAME, score_threshold=0.1) == []
 
     def test_inference_still_runs_once_per_detect(self):

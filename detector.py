@@ -63,16 +63,25 @@ def _set_resized_input(interpreter, size, resize):
     Mirrors pycoral's adapters.common.set_resized_input: preserves aspect
     ratio by scaling to fit, then pads the rest with zeros, so callers don't
     need to worry about non-square input tensors.
+
+    Only the *padding* strips are zeroed, not the whole tensor. The previous
+    ``tensor.fill(0)`` wrote every byte of a 512x512x3 buffer (~800KB) on every
+    single inference, then immediately overwrote most of it with the resized
+    frame. The region the frame covers needs no pre-zeroing at all.
     """
     width, height = _input_size(interpreter)
     w, h = size
     scale = min(width / w, height / h)
     w, h = int(w * scale), int(h * scale)
     tensor = _input_tensor(interpreter)
-    tensor.fill(0)
     _, _, channel = tensor.shape
     result = resize((w, h))
     tensor[:h, :w] = result.reshape((h, w, channel))
+    # Zero only what the frame does not cover (right and bottom strips).
+    if h < height:
+        tensor[h:, :] = 0
+    if w < width:
+        tensor[:h, w:] = 0
     return (scale, scale)
 
 
@@ -81,34 +90,65 @@ def _output_tensor(interpreter, i):
     return interpreter.tensor(index)()
 
 
-def _get_objects(interpreter, score_threshold, image_scale):
-    """Return [{'id', 'score', 'bbox': (xmin,ymin,xmax,ymax)}, ...].
+def resolve_output_layout(interpreter):
+    """Determine once where each output tensor lives.
 
     Output tensor layout for TFLite_Detection_PostProcess-based SSD models
-    varies by export; this checks for a model signature first (newer
-    exports), then falls back to the same tensor-order heuristics pycoral
-    used for older exports like the stock
-    ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite.
+    varies by export: newer exports expose a signature, older ones (like the
+    stock ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite) are
+    identified by tensor-order heuristics — the same ones pycoral used.
+
+    This is resolved **once at load time** rather than per inference. It used to
+    run inside `_get_objects`, which meant a private-API call
+    (`_get_full_signature_list`) plus a re-read of every output tensor's details
+    on every single frame, on the critical path. The layout cannot change for a
+    loaded model, so there is nothing to re-derive.
     """
     signature_list = interpreter._get_full_signature_list()  # noqa: SLF001
     if signature_list:
         if len(signature_list) > 1:
             raise ValueError("Only support model with one signature.")
         signature = signature_list[next(iter(signature_list))]
-        count = int(interpreter.tensor(signature["outputs"]["output_0"])()[0])
-        scores = interpreter.tensor(signature["outputs"]["output_1"])()[0]
-        class_ids = interpreter.tensor(signature["outputs"]["output_2"])()[0]
-        boxes = interpreter.tensor(signature["outputs"]["output_3"])()[0]
-    elif _output_tensor(interpreter, 3).size == 1:
-        boxes = _output_tensor(interpreter, 0)[0]
-        class_ids = _output_tensor(interpreter, 1)[0]
-        scores = _output_tensor(interpreter, 2)[0]
-        count = int(_output_tensor(interpreter, 3)[0])
-    else:
-        scores = _output_tensor(interpreter, 0)[0]
-        boxes = _output_tensor(interpreter, 1)[0]
-        count = int(_output_tensor(interpreter, 2)[0])
-        class_ids = _output_tensor(interpreter, 3)[0]
+        outputs = signature["outputs"]
+        return {
+            "kind": "signature",
+            "count": outputs["output_0"],
+            "scores": outputs["output_1"],
+            "class_ids": outputs["output_2"],
+            "boxes": outputs["output_3"],
+        }
+    if _output_tensor(interpreter, 3).size == 1:
+        return {"kind": "order", "boxes": 0, "class_ids": 1, "scores": 2, "count": 3}
+    return {"kind": "order", "scores": 0, "boxes": 1, "count": 2, "class_ids": 3}
+
+
+def _read_outputs(interpreter, layout):
+    """Return ``(boxes, class_ids, scores, count)`` for the resolved *layout*."""
+    if layout["kind"] == "signature":
+        get = interpreter.tensor
+        return (
+            get(layout["boxes"])()[0],
+            get(layout["class_ids"])()[0],
+            get(layout["scores"])()[0],
+            int(get(layout["count"])()[0]),
+        )
+    return (
+        _output_tensor(interpreter, layout["boxes"])[0],
+        _output_tensor(interpreter, layout["class_ids"])[0],
+        _output_tensor(interpreter, layout["scores"])[0],
+        int(_output_tensor(interpreter, layout["count"])[0]),
+    )
+
+
+def _get_objects(interpreter, score_threshold, image_scale, layout=None):
+    """Return [{'id', 'score', 'bbox': (xmin,ymin,xmax,ymax)}, ...].
+
+    *layout* is the cached result of ``resolve_output_layout``; it is derived on
+    demand when omitted so this stays usable standalone (and testable).
+    """
+    if layout is None:
+        layout = resolve_output_layout(interpreter)
+    boxes, class_ids, scores, count = _read_outputs(interpreter, layout)
 
     width, height = _input_size(interpreter)
     scale_x, scale_y = image_scale
@@ -199,6 +239,10 @@ class DogDetector:
                  target_label="dog"):
         self.interp = _make_interpreter(model_path)
         self.interp.allocate_tensors()
+        # Resolve the output tensor layout once — it cannot change for a loaded
+        # model, and deriving it per inference cost a private-API call plus a
+        # re-read of every output tensor's details on the critical path.
+        self._output_layout = resolve_output_layout(self.interp)
         # Acts as the default/floor; callers may pass a stricter value per call.
         self.score_threshold = score_threshold
         self.labels = self._load_labels(labels_path)
@@ -241,7 +285,8 @@ class DogDetector:
             self.interp, (w, h), lambda size: cv2.resize(frame, size))
         self.interp.invoke()
         out = []
-        for obj in _get_objects(self.interp, threshold, scale):
+        for obj in _get_objects(self.interp, threshold, scale,
+                                layout=self._output_layout):
             if obj["id"] not in self.target_ids:
                 continue
             bbox = _clamp_bbox(obj["bbox"], w, h)
