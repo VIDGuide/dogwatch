@@ -41,6 +41,11 @@ class MotionGate:
         self._prev_gray = None
         self._last_detect_time = 0.0
         self._motion_fraction = 0.0  # exposed for debugging/logging
+        # Reused scratch buffers for the per-frame diff, so the hot path does
+        # not allocate two full-frame arrays per tick. Reallocated only when the
+        # frame shape changes.
+        self._diff = None
+        self._mask = None
 
     def should_detect(self, gray, t0):
         """Return True if detection should run on this frame.
@@ -51,38 +56,60 @@ class MotionGate:
         t0   : float — current timestamp (time.time() or equivalent)
 
         Always returns True (bypassed) if the gate is disabled via config.
+
+        **Contract:** *gray* must be a freshly allocated array that the caller
+        does not subsequently mutate. This class keeps a reference to it as the
+        next comparison baseline rather than copying it (a full greyscale memcpy
+        per decoded frame, for an array nobody writes to). ``BehaviorMonitor``
+        relies on the same contract for its own ``prev_gray``. In practice
+        ``cv2.cvtColor`` allocates a new array on every tick — do not "optimise"
+        that into a reused ``dst=`` buffer without also restoring the copies
+        here, or motion detection will silently always read zero.
         """
         if not self.enabled:
             return True
 
         # First frame after startup: always detect (establishes baseline).
         if self._prev_gray is None:
-            self._prev_gray = gray.copy()
+            self._prev_gray = gray
             self._last_detect_time = t0
             return True
 
         # Periodic forced detection even without motion, so a dog that walks
         # in and stops isn't forgotten once the tracker's max_misses expire.
         if t0 - self._last_detect_time >= self.max_idle:
-            self._prev_gray = gray.copy()
+            self._prev_gray = gray
             self._last_detect_time = t0
             return True
 
         # Shape mismatch (resolution change, crop change) — detect and reset.
         if gray.shape != self._prev_gray.shape:
-            self._prev_gray = gray.copy()
+            self._prev_gray = gray
             self._last_detect_time = t0
+            # Scratch buffers are shape-bound; drop them so they're reallocated.
+            self._diff = None
+            self._mask = None
             return True
 
         # Core motion check: fraction of pixels whose absolute difference
         # exceeds the noise floor.
-        diff = cv2.absdiff(gray, self._prev_gray)
-        changed = (diff > self.pixel_threshold).sum()
+        #
+        # Uses OpenCV threshold + countNonZero into preallocated buffers rather
+        # than numpy's `(diff > t).sum()`. The numpy form materialises a
+        # full-frame boolean array and then sums it in Python-level numpy; the
+        # OpenCV form is SIMD-accelerated and, with `dst=`, allocates nothing.
+        # This runs on every decoded frame, gated or not, so it is the single
+        # most frequently executed piece of arithmetic in the detector.
+        self._diff = cv2.absdiff(gray, self._prev_gray, dst=self._diff)
+        _, self._mask = cv2.threshold(
+            self._diff, self.pixel_threshold, 255, cv2.THRESH_BINARY,
+            dst=self._mask)
+        changed = cv2.countNonZero(self._mask)
         total = gray.shape[0] * gray.shape[1]
         self._motion_fraction = changed / total if total else 0.0
 
         if self._motion_fraction >= self.threshold:
-            self._prev_gray = gray.copy()
+            self._prev_gray = gray
             self._last_detect_time = t0
             return True
 

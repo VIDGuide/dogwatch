@@ -134,23 +134,37 @@ def main():
     err_counts = {}
     last_err_log = {}
 
-    while True:
-        t0 = time.time()
+    try:
+        while True:
+            t0 = time.time()
+            for pipe in pipelines:
+                try:
+                    pipe.tick(shared, t0)
+                except Exception as exc:
+                    n = err_counts.get(pipe.name, 0) + 1
+                    err_counts[pipe.name] = n
+                    # Log the first error immediately, then at most once a minute.
+                    if n == 1 or t0 - last_err_log.get(pipe.name, 0.0) > 60:
+                        last_err_log[pipe.name] = t0
+                        print(f"[{pipe.name}] tick failed ({n} total): "
+                              f"{type(exc).__name__}: {redact(exc)}", flush=True)
+                        traceback.print_exc()
+            dt = time.time() - t0
+            if dt < interval:
+                time.sleep(interval - dt)
+    except KeyboardInterrupt:
+        print("Interrupted — shutting down", flush=True)
+    finally:
+        # Drain each camera's queued writes so an event that fired moments
+        # before shutdown still reaches disk and the event DB, and release the
+        # capture handles. Writes are asynchronous now, so without this a clean
+        # stop could silently lose the last event or two.
         for pipe in pipelines:
             try:
-                pipe.tick(shared, t0)
+                pipe.close()
             except Exception as exc:
-                n = err_counts.get(pipe.name, 0) + 1
-                err_counts[pipe.name] = n
-                # Log the first error immediately, then at most once a minute.
-                if n == 1 or t0 - last_err_log.get(pipe.name, 0.0) > 60:
-                    last_err_log[pipe.name] = t0
-                    print(f"[{pipe.name}] tick failed ({n} total): "
-                          f"{type(exc).__name__}: {redact(exc)}", flush=True)
-                    traceback.print_exc()
-        dt = time.time() - t0
-        if dt < interval:
-            time.sleep(interval - dt)
+                print(f"[{pipe.name}] error during shutdown: {redact(exc)}",
+                      flush=True)
 
 
 if __name__ == "__main__":

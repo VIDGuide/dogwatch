@@ -106,6 +106,13 @@ effective `score_threshold`, so you can confirm what's actually in force.
 | `motion_gate_threshold` | (Optional) Fraction of pixels that must change to trigger detection. Default 0.005 (0.5%). |
 | `motion_gate_pixel_threshold` | (Optional) Per-pixel abs-diff floor for noise filtering. Default 25. |
 | `motion_gate_max_idle_seconds` | (Optional) Force a detection pass at least this often even if no motion, so a dog that walks in and stops isn't missed. Default 10. |
+| `static_suppression_enabled` | (Optional) Suppress events from a bbox region that fires repeatedly at the same position without anything ever having moved there — i.e. a structural element the model keeps scoring as a dog. Default `true`. |
+| `static_suppression_iou_threshold` | (Optional) Bbox overlap required to treat two detections as "the same spot". Default 0.7. |
+| `static_suppression_max_hits` | (Optional) Same-spot hits before the region is treated as static. Default 3. |
+| `static_suppression_decay_seconds` | (Optional) Forget a region after this long with no detections, so a false-positive spot that shifts with the light doesn't stay suppressed forever. Default 300. |
+| `static_suppression_protected_events` | (Optional) Event types that are **never** suppressed. Default `["digging"]`. Digging is the event the siren depends on, and the cost of dropping a real one (dogs get out) is far worse than the cost of letting a false one through to vision verification. A protected event also *clears* an existing suppression for that region — a fence beam doesn't dig. |
+| `static_suppression_movement_grace_seconds` | (Optional) After the tracker sees real movement into a region, withhold suppression for this long. Defaults to `static_suppression_decay_seconds`. This is what stops a dog that walks in and then holds still from being reclassified as a beam. |
+| `write_queue_size` | (Optional) Depth of the per-camera background write queue (event-clip JPEG encodes, debug captures, SQLite inserts). Default 256. These writes are off the detection thread; if the queue overflows the write is dropped and logged rather than stalling detection. |
 | `gpu_decode` | (Optional) Offload RTSP frame decode to GPU via NVDEC. Default `false`. Requires `Dockerfile.gpu` / `docker-compose.gpu.yml` and an NVIDIA GPU. See "Performance tuning → GPU-accelerated decode" above. |
 
 **MQTT security note:** by default the broker connection is plaintext and
@@ -420,6 +427,7 @@ Levers to reduce decode CPU:
 | Approach | Effort | Effect |
 |----------|--------|--------|
 | Lower `target_fps` | Config change | The frame grabber decodes at `2 × target_fps`. Use 2–3 for high-res streams; dogs move slowly enough that 2fps detection cadence is fine. |
+| Background writes | Already active | Event-clip JPEG encodes, debug captures and SQLite inserts run on a per-camera writer thread instead of inline in the detection loop. A full-res `cv2.imwrite` measured ~42ms on a 5MP frame — roughly 20% of the 200ms *fleet-wide* budget at `target_fps: 5`, spent precisely when an event was firing. See `write_queue_size`. |
 | Use the sub-stream for detection, main for snapshots | Config change | Most cameras expose a low-res sub-stream (e.g. 640×480). Use it as `rtsp_url` with no `crop_roi` for cheap detection, and let the notifier use the main stream for annotated snapshot capture. |
 | Motion gate (default: on) | Already active | When nothing moves, no TPU inference runs — but the frame grabber still decodes. The above two approaches reduce this baseline decode cost. |
 
