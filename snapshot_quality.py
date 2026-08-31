@@ -36,8 +36,12 @@ def active_tile_fraction(gray, tiles=8, tile_std_thresh=15.0):
     return active / total if total else 1.0
 
 
-def is_image_bad(img):
+def is_image_bad(img, gray=None):
     """Check if a decoded image is a grey/static/corrupted frame.
+
+    Pass *gray* when the caller has already converted the frame to greyscale
+    (the detection loop always has), to skip a redundant full-frame
+    cvtColor on the hot path.
 
     Empirically measured on these cameras:
       * genuine grey decode glitch:  mean~128, std ~1-3
@@ -51,7 +55,8 @@ def is_image_bad(img):
     """
     if img is None:
         return True
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if gray is None:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     mean, stddev = cv2.meanStdDev(gray)
     mean_v, std_v = mean[0][0], stddev[0][0]
     # Pure black/white / dead frames are always suspect.

@@ -17,8 +17,11 @@ import urllib.error
 
 import paho.mqtt.client as mqtt
 import requests
-from PIL import Image, ImageDraw, ImageStat
+from PIL import Image, ImageDraw
 from requests.auth import HTTPDigestAuth
+
+from dw_redact import redact
+from image_quality import validate_image_file
 
 STATUS_FILE = "/tmp/dogwatch-events.jsonl"
 MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
@@ -94,7 +97,17 @@ def _snapshot_topic(camera: str) -> str:
 # NOTE: the fence "camera" deliberately uses the low-res SUB stream for
 # snapshots.  The main stream caused constant ffmpeg timeouts (frozen HA
 # image); the sub stream decodes instantly and is plenty for a still.
-CAMERAS = _CONFIG["cameras"]
+#
+# Keys beginning with "_" are filtered out: the example config documents
+# itself with "_comment_camera" entries *inside* the cameras object, and those
+# used to be treated as real cameras. main() starts a periodic-still thread per
+# camera, so the comment string reached capture_snapshot, where
+# `cam["snapshot_url"]` on a str raises TypeError outside the try block — the
+# thread died silently at startup, taking that camera's live still with it.
+CAMERAS = {
+    name: cam for name, cam in _CONFIG["cameras"].items()
+    if isinstance(cam, dict) and not name.startswith("_")
+}
 
 
 # ---- Secrets ----
@@ -486,81 +499,17 @@ def send_telegram_text(text: str) -> bool:
 
 # ---- Snapshot ----
 
-def _active_tile_fraction(gray_img, tiles: int = 8, tile_std_thresh: float = 15.0) -> float:
-    """Fraction of NxN tiles containing real spatial structure (PIL, no numpy).
-
-    Mirrors the detector's check: a valid scene has detail in almost all
-    tiles (~0.95); a flat grey glitch ~0.00; a partial decode with a
-    localized pixelated blob only ~0.06.  Catches the "grey + a bit of dog"
-    case that a whole-frame std/edge metric misses.
-    """
-    w, h = gray_img.size
-    tw, th = w // tiles, h // tiles
-    if tw == 0 or th == 0:
-        return 1.0  # too small to tile
-    active = 0
-    total = 0
-    for ty in range(tiles):
-        for tx in range(tiles):
-            tile = gray_img.crop((tx * tw, ty * th, (tx + 1) * tw, (ty + 1) * th))
-            if ImageStat.Stat(tile).stddev[0] >= tile_std_thresh:
-                active += 1
-            total += 1
-    return active / total if total else 1.0
-
-
-def _validate_image(path: str, min_bytes: int = 15_000) -> bool:
+def _validate_image(path: str) -> bool:
     """Check that the image has real content (not grey / partial-decode corruption).
 
-    Three layers, matching `snapshot_quality.is_image_bad` in the container:
-      1. Size floor — flat grey JPEGs are much smaller than real frames.
-      2. Global grey gate — mid-grey mean with near-zero std = decode glitch.
-      3. Spatial-spread backstop — a grey field with a localized pixelated
-         blob (surviving "motion" region) can pass 1 & 2 but only lights up a
-         couple of tiles; real scenes light up almost all of them.
-
-    The size floor default (15KB) is deliberately low: it only needs to
-    separate genuinely truncated/corrupt files (observed as low as 35 bytes)
-    from *any* legitimate JPEG, not from a specific camera's typical size.
-    A fixed floor tuned to one camera's resolution (previously 50KB, sized
-    for the rear-east main stream's ~300KB+ frames) silently rejected every
-    single capture from the lower-res fence "camera" sub-stream (~28KB
-    frames) as "corruption" — the pixel-content checks below (2 and 3) never
-    even ran, because the encoder loop always dies here. Confirmed via a set
-    of fresh captures on that stream: all were valid images (mean/std well
-    outside the grey-glitch range) despite being ~28-30KB.
+    Thin wrapper over the shared ``image_quality`` module, which is now also
+    used by ``dogwatch_check.py``'s fresh-capture path. That sharing is the
+    point: the check script previously had its own capture that validated only
+    file size, so a grey/partial-decode frame reached the vision model, came
+    back NO_DOG, and produced a "false alarm" verdict for a real dog while
+    suppressing the siren.
     """
-    try:
-        size = os.path.getsize(path)
-    except OSError:
-        return False
-    if size < min_bytes:
-        print(f"  Snapshot rejected: {size} bytes < {min_bytes} min (likely corruption)")
-        return False
-
-    try:
-        gray = Image.open(path).convert("L")
-    except Exception as exc:
-        print(f"  Snapshot rejected: cannot decode ({exc})")
-        return False
-
-    st = ImageStat.Stat(gray)
-    mean_v, std_v = st.mean[0], st.stddev[0]
-    # Pure dead frame.
-    if std_v < 8:
-        print(f"  Snapshot rejected: flat frame (std={std_v:.1f})")
-        return False
-    # Mid-grey decode glitch band.
-    if 105 < mean_v < 150:
-        if std_v < 12:
-            print(f"  Snapshot rejected: grey glitch (mean={mean_v:.0f} std={std_v:.1f})")
-            return False
-        frac = _active_tile_fraction(gray)
-        if frac < 0.20:
-            print(f"  Snapshot rejected: partial decode (mean={mean_v:.0f} "
-                  f"std={std_v:.1f} active_tiles={frac:.2f})")
-            return False
-    return True
+    return validate_image_file(path, log=print)
 
 
 def capture_snapshot(camera_name: str) -> str:
@@ -622,7 +571,11 @@ def capture_snapshot(camera_name: str) -> str:
         except OSError:
             pass
     except Exception as exc:
-        print(f"RTSP snapshot for '{camera_name}' failed: {exc}")
+        # redact(): subprocess.TimeoutExpired stringifies the entire argv, and
+        # the ffmpeg argv contains rtsp://user:pass@host. An RTSP timeout is
+        # the *ordinary* failure mode for a slow/offline camera, so without
+        # this the credentials landed in docker logs routinely.
+        print(f"RTSP snapshot for '{camera_name}' failed: {redact(exc)}")
 
     # Fallback: HTTP ISAPI snapshot (always clean JPEG)
     if cam["snapshot_url"].startswith("http://") or cam["snapshot_url"].startswith("https://"):
@@ -638,7 +591,9 @@ def capture_snapshot(camera_name: str) -> str:
                 print(f"  HTTP fallback snapshot: {os.path.getsize(snap_path)} bytes")
                 return snap_path
         except Exception as exc:
-            print(f"  HTTP snapshot fallback failed: {exc}")
+            # redact(): requests embeds the request URL (with credentials) in
+            # its exception text.
+            print(f"  HTTP snapshot fallback failed: {redact(exc)}")
 
     return ""
 
@@ -911,7 +866,13 @@ def main():
     # reconnect, no error, and no indication anywhere that publishes were
     # going nowhere).
     client.reconnect_delay_set(min_delay=1, max_delay=60)
-    client.connect(MQTT_HOST, MQTT_PORT, 60)
+    # connect_async, not connect(): a synchronous connect() raises when the
+    # broker isn't up yet, which would kill the notifier at startup (it is PID 1
+    # in its container, so the whole container restart-loops until the broker
+    # happens to be ready first). connect_async hands the initial connection
+    # and all retries to the network loop, so "broker not up yet" becomes an
+    # ordinary recoverable state instead of a crash.
+    client.connect_async(MQTT_HOST, MQTT_PORT, 60)
     print(f"Dogwatch notifier listening on {BASE_TOPIC}/#")
 
     _start_mqtt_watchdog(client)

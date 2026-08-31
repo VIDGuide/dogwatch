@@ -45,6 +45,19 @@ set -u
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 NOTIFY_CONFIG="${DOGWATCH_NOTIFY_CONFIG:-$SCRIPT_DIR/dogwatch-notify.config.json}"
 
+log() { echo "dog-alarm: $*"; }
+
+# Daily stats capture (per-day counters for the report) — never fatal.
+#
+# Defined up here, not further down: bash resolves functions at execution time,
+# so the two early-exit paths below (missing config, unreadable config) used to
+# run before the definition and emit "bump_stats: command not found" — meaning
+# the alarm_errors counter was never incremented for the two most interesting
+# failures. Exit codes were unaffected, which is why it went unnoticed.
+bump_stats() {
+  python3 "$SCRIPT_DIR/stats.py" bump "$1" >/dev/null 2>&1 || true
+}
+
 if [ ! -f "$NOTIFY_CONFIG" ]; then
   echo "dog-alarm: notify config not found: $NOTIFY_CONFIG" >&2
   bump_stats alarm_errors
@@ -142,13 +155,6 @@ try:
 except Exception as e:
     print(f'  TG send error: {e}', file=sys.stderr)
 PYEOF
-}
-
-log() { echo "dog-alarm: $*"; }
-
-# Daily stats capture (per-day counters for the report) — never fatal.
-bump_stats() {
-  python3 "$SCRIPT_DIR/stats.py" bump "$1" >/dev/null 2>&1 || true
 }
 
 # ---- Guard 1: enabled? ----

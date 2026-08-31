@@ -224,3 +224,121 @@ class TestEvaluate:
         # Identical frame next -> zero motion -> digging condition breaks.
         mon.evaluate({1: tr}, gray_b)
         assert tr.dig_since is None
+
+
+
+class TestZoneBoundaryInclusion:
+    """`contains` excludes the polygon boundary; `covers` includes it.
+
+    This is not hypothetical: the default zone in config.example.json is the
+    full frame, which puts the polygon edge exactly at y == frame_h, and the
+    paw point is the bbox *bottom* edge. Every dog detected at the bottom of
+    the frame therefore sat precisely on the excluded boundary.
+    """
+
+    FULL_FRAME_ZONE = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+
+    def test_paw_exactly_on_bottom_edge_is_inside_full_frame_zone(self):
+        mon = BehaviorMonitor(make_cfg(fence_zone_norm=self.FULL_FRAME_ZONE),
+                              FRAME_W, FRAME_H)
+        # Paw point y == FRAME_H, exactly on the polygon edge.
+        assert mon.in_zone((80, 100, 120, FRAME_H)) is True
+
+    def test_paw_exactly_on_zone_top_edge_is_inside(self):
+        mon = BehaviorMonitor(make_cfg(), FRAME_W, FRAME_H)  # bottom-half zone
+        # Bottom-half zone starts at y == 100; a paw exactly there counts.
+        assert mon.in_zone((80, 50, 120, 100)) is True
+
+    def test_paw_on_left_edge_is_inside(self):
+        mon = BehaviorMonitor(make_cfg(fence_zone_norm=self.FULL_FRAME_ZONE),
+                              FRAME_W, FRAME_H)
+        # paw_point x is the bbox centre, so use a zero-width box at x == 0.
+        assert mon.in_zone((0, 100, 0, 150)) is True
+
+    def test_paw_clearly_outside_is_still_outside(self):
+        mon = BehaviorMonitor(make_cfg(), FRAME_W, FRAME_H)
+        assert mon.in_zone((80, 20, 120, 50)) is False
+
+    def test_paw_just_past_edge_is_outside(self):
+        mon = BehaviorMonitor(make_cfg(), FRAME_W, FRAME_H)
+        # One pixel above the bottom-half zone boundary.
+        assert mon.in_zone((80, 50, 120, 99)) is False
+
+
+class TestObserveFrame:
+    """observe_frame keeps prev_gray advancing on frames the motion gate
+    suppresses, so intra_box_motion always compares against the immediately
+    preceding frame rather than whatever last passed the gate (up to
+    motion_gate_max_idle_seconds ago)."""
+
+    def test_observe_frame_sets_prev_gray(self):
+        mon = BehaviorMonitor(make_cfg(), FRAME_W, FRAME_H)
+        gray = np.full((FRAME_H, FRAME_W), 7, dtype=np.uint8)
+        mon.observe_frame(gray)
+        assert mon.prev_gray is gray
+
+    def test_motion_measured_against_observed_frame(self):
+        mon = BehaviorMonitor(make_cfg(), FRAME_W, FRAME_H)
+        black = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        white = np.full((FRAME_H, FRAME_W), 255, dtype=np.uint8)
+        mon.observe_frame(black)
+        assert mon.intra_box_motion(white, (0, 0, 50, 50)) == 1.0
+
+    def test_gated_frames_keep_baseline_current(self):
+        """Two gated (identical) frames then a real one: motion is measured
+        against the immediately-preceding frame, so an unchanged scene reads as
+        zero motion rather than accumulating a stale 10s-old difference."""
+        mon = BehaviorMonitor(make_cfg(), FRAME_W, FRAME_H)
+        steady = np.full((FRAME_H, FRAME_W), 100, dtype=np.uint8)
+        mon.observe_frame(steady)
+        mon.observe_frame(steady.copy())
+        assert mon.intra_box_motion(steady.copy(), (0, 0, 50, 50)) == 0.0
+
+
+class TestCooldownPruning:
+    """_last_event is keyed by (event_type, track_id) and track ids increment
+    forever, so without pruning every track that ever fired left a permanent
+    entry — an unbounded dict in a process meant to run for months."""
+
+    def test_entry_kept_while_track_is_alive(self):
+        mon = BehaviorMonitor(make_cfg(event_cooldown_seconds=1), FRAME_W, FRAME_H)
+        gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        tr = Track(1, (80, 120, 120, 150), t=time.time())
+        mon.evaluate({1: tr}, gray)
+        assert ("dog_at_fence", 1) in mon._last_event
+
+    def test_entry_pruned_once_track_gone_and_cooldown_expired(self):
+        mon = BehaviorMonitor(make_cfg(event_cooldown_seconds=0), FRAME_W, FRAME_H)
+        gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        tr = Track(1, (80, 120, 120, 150), t=time.time())
+        mon.evaluate({1: tr}, gray)
+        assert mon._last_event
+
+        # Age the recorded event, then evaluate with the track gone.
+        for key in list(mon._last_event):
+            mon._last_event[key] = time.time() - 100
+        mon.evaluate({}, gray)
+        assert mon._last_event == {}
+
+    def test_entry_not_pruned_while_cooldown_still_active(self):
+        """Pruning must never let a suppressed event through early."""
+        mon = BehaviorMonitor(make_cfg(event_cooldown_seconds=10_000),
+                              FRAME_W, FRAME_H)
+        gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        tr = Track(1, (80, 120, 120, 150), t=time.time())
+        mon.evaluate({1: tr}, gray)
+        mon.evaluate({}, gray)  # track gone, but cooldown is far from expired
+        assert ("dog_at_fence", 1) in mon._last_event
+
+    def test_dict_does_not_grow_without_bound_across_many_tracks(self):
+        mon = BehaviorMonitor(make_cfg(event_cooldown_seconds=0), FRAME_W, FRAME_H)
+        gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        for tid in range(1, 200):
+            tr = Track(tid, (80, 120, 120, 150), t=time.time())
+            mon.evaluate({tid: tr}, gray)
+            # Age everything so the previous track's entry is prunable.
+            for key in list(mon._last_event):
+                if key[1] != tid:
+                    mon._last_event[key] = time.time() - 100
+        # Only the most recent track's entry should survive.
+        assert len(mon._last_event) <= 2

@@ -36,6 +36,7 @@ from event_store import EventStore
 from frame_grabber import FrameGrabber
 from motion_gate import MotionGate
 from mqtt_publisher import Publisher
+from redact import redact
 from snapshot_quality import is_image_bad
 from static_suppressor import StaticSuppressor
 from tracker import CentroidTracker
@@ -50,7 +51,16 @@ class CameraPipeline:
             cfg["rtsp_url"],
             target_fps=cfg.get("target_fps", 5),
             gpu_decode=cfg.get("gpu_decode", False),
+            name=name,
         )
+
+        # A frame older than this means the reader is wedged/dead rather than
+        # the scene being static — the two are otherwise indistinguishable.
+        # Generous by default so a slow stream isn't flagged; the failure this
+        # catches is measured in minutes, not seconds.
+        self.stale_after = float(cfg.get("frame_stale_seconds", 30))
+        self._stale = False
+        self._last_stale_log = 0.0
 
         # Optional HTTP snapshot URL (NVR ISAPI) for clean snapshots.
         # Hikvision format: http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture
@@ -67,8 +77,10 @@ class CameraPipeline:
             if frame is not None:
                 break
             if time.time() > deadline:
+                # redact(): rtsp_url embeds user:pass, and this message goes
+                # to stderr / docker logs / any log shipper.
                 raise RuntimeError(
-                    f"[{name}] No frame received from {cfg['rtsp_url']} after "
+                    f"[{name}] No frame received from {redact(cfg['rtsp_url'])} after "
                     f"{cfg.get('startup_timeout_seconds', 60)}s — check the RTSP "
                     f"URL/credentials and that the camera is reachable"
                 )
@@ -119,19 +131,28 @@ class CameraPipeline:
                 use_tls=cfg.get("mqtt_tls", False),
             )
         except Exception as e:
-            print(f"[{name}] MQTT connection failed: {e} — running without publishing")
+            # Publisher no longer raises just because the broker is down — it
+            # uses connect_async, so an unreachable broker is retried forever
+            # by the network thread. Reaching this handler therefore means
+            # something structurally wrong (bad TLS setup, invalid host type,
+            # unparseable port), not a transient outage. We still degrade to
+            # "detect but don't publish" rather than taking the process down,
+            # but it is now genuinely exceptional and logged as such.
+            print(f"[{name}] MQTT publisher could not be constructed: "
+                  f"{redact(e)} — this camera will detect but NOT publish. "
+                  f"Check mqtt_host/mqtt_port/mqtt_tls in the config.")
             self.pub = None
         self.full_w, self.full_h = full_w, full_h
 
-        # Publish detection geometry to MQTT so the notifier (and any other
-        # consumer) always knows the exact resolution and crop the detector
-        # is running at — single source of truth, no manual sync needed.
+        # Publish detection geometry to MQTT so a consumer knows the exact
+        # resolution and crop the detector is running at, without a
+        # hand-maintained copy. Note: deliberately does NOT include
+        # snapshot_url — see publish_geometry's docstring.
         if self.pub:
             self.pub.publish_geometry(
                 detect_w=self.w,
                 detect_h=self.h,
                 crop_roi=list(self.crop_norm) if self.crop_norm else None,
-                snapshot_url=cfg.get("snapshot_url"),
             )
         self.clip_dir = cfg.get("clip_dir", "clips")
         self.cooldown = cfg.get("event_cooldown_seconds", 30)
@@ -200,7 +221,10 @@ class CameraPipeline:
                     print(f"[{self.name}] HTTP snapshot returned grey/static frame (attempt {attempt + 1}) \u2014 retrying")
 
             except Exception as e:
-                print(f"[{self.name}] HTTP snapshot fetch failed (attempt {attempt + 1}): {e}")
+                # redact(): requests exceptions embed the request URL, which
+                # for the ISAPI snapshot endpoint carries user:pass.
+                print(f"[{self.name}] HTTP snapshot fetch failed "
+                      f"(attempt {attempt + 1}): {redact(e)}")
 
             if attempt < 2:
                 time.sleep(0.5)  # wait for next GOP I-frame before retrying
@@ -265,27 +289,82 @@ class CameraPipeline:
         if ok and self.pub:
             self.pub.snapshot(buf.tobytes(), capture_ts=capture_ts)
 
+    def _set_stale(self, is_stale, t0, age=None):
+        """Flip availability when the frame supply starts/stops being stale."""
+        if is_stale and not self._stale:
+            self._stale = True
+            health = self.grab.health()
+            print(f"[{self.name}] STALE: newest frame is {age:.1f}s old "
+                  f"(limit {self.stale_after:.0f}s) — "
+                  f"thread_alive={health['thread_alive']} "
+                  f"reconnects={health['reconnects']} "
+                  f"last_error={health['last_error']!r}", flush=True)
+            self._last_stale_log = t0
+            if self.pub:
+                self.pub.set_available(False)
+        elif is_stale:
+            # Keep reminding, but slowly, so a dead camera stays visible in
+            # the log without flooding it.
+            if t0 - self._last_stale_log > 300:
+                self._last_stale_log = t0
+                print(f"[{self.name}] still stale: newest frame is "
+                      f"{age:.1f}s old", flush=True)
+        elif self._stale:
+            self._stale = False
+            print(f"[{self.name}] frames flowing again", flush=True)
+            if self.pub:
+                self.pub.set_available(True)
+        elif self.pub:
+            # Normal path — no-ops after the first call (change-gated).
+            self.pub.set_available(True)
+
     def tick(self, detector, t0):
         """Process one frame through the shared detector."""
-        frame = self.grab.read()
+        frame, frame_ts = self.grab.read_with_ts()
         if frame is None:
+            # No frame ever, or the grabber has nothing yet.
+            self._set_stale(True, t0, age=self.grab.frame_age(t0))
             return
+
+        # Staleness gate: a frozen frame is byte-identical to a static scene,
+        # so without a capture timestamp a dead reader looks like a perfectly
+        # still yard. Worse, motion_gate_max_idle_seconds forces a detection
+        # pass every 10s regardless of motion — so a frozen frame that happens
+        # to contain a dog re-fired dog_at_fence forever. Bail out (and mark
+        # the entity unavailable in HA) instead of analysing stale pixels.
+        age = t0 - frame_ts if frame_ts is not None else float("inf")
+        if age > self.stale_after:
+            self._set_stale(True, t0, age=age)
+            return
+        self._set_stale(False, t0)
 
         # Crop to region of interest before detection (zoom effect).
         roi = self._apply_crop(frame)
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+        # Quality check FIRST, before the motion gate.
+        #
+        # Ordering matters and used to be the other way round: a grey/corrupt
+        # mid-GOP frame produces an enormous frame diff, so it opened the gate,
+        # got stored as the gate's _prev_gray baseline, and updated
+        # _last_detect_time — and only then was discarded as bad. The next
+        # *good* frame then diffed hugely against that corrupt baseline,
+        # producing a phantom "motion" event and a wasted TPU inference after
+        # every single decode glitch. Rejecting bad frames before any state is
+        # touched means a glitch is now genuinely a no-op.
+        if is_image_bad(roi, gray=gray):
+            return
 
         # Motion gate: skip the expensive TPU inference when the scene is
         # completely static. This eliminates false positives from permanent
         # structural elements (beams, railings, fence posts) that never move
         # but that the model consistently scores at 0.5-0.7 confidence.
         if not self.motion_gate.should_detect(gray, t0):
-            return
-
-        # Quality check on the cropped ROI (not the full frame — much cheaper).
-        # Discards grey/corrupt frames from mid-GOP connects before wasting a
-        # TPU inference cycle on garbage input.
-        if is_image_bad(roi):
+            # Still advance the behaviour baseline, so intra-box motion is
+            # always measured against the immediately-preceding frame rather
+            # than against whatever frame last passed the gate (which could be
+            # 10s ago). See BehaviorMonitor.observe_frame.
+            self.monitor.observe_frame(gray)
             return
 
         dets = detector.detect(roi)

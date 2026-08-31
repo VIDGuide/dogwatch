@@ -74,7 +74,7 @@ Each camera needs its own `config-<name>.json`. See `config.example.json` and
 | `score_threshold` | Minimum detection confidence (0-1) required to fire an event. Default 0.4. Raise this if you're seeing false positives (fence posts, shadows, soil texture misidentified as a dog) — see "Known limitations" below for a documented example. Each event's `attributes` MQTT payload now includes the actual detection `score`, so you can check how confident a specific false positive was before deciding how far to raise this. |
 | `snapshot_url` | (Optional) HTTP snapshot URL for clean stills |
 | `crop_roi` | (Optional) `[x1, y1, x2, y2]` normalised 0-1 — zoom into part of frame. Strongly recommended if the camera's full field of view is much wider than the actual fence/zone area: the detection model's input resolution (512×512 for EfficientDet-Lite3, 300×300 for older models) can struggle with small/distant dogs in a wide uncropped frame — see `samples/README.md` for measured evidence. Not currently set for the fence `camera` config, which is the most likely cause of missed detections on that camera specifically. |
-| `fence_zone_norm` | Polygon vertices `[[x,y], ...]` normalised 0-1 |
+| `fence_zone_norm` | Polygon vertices `[[x,y], ...]` normalised 0-1 **relative to the cropped frame, not the full frame**. If `crop_roi` is set, these coordinates are fractions of the crop — so changing `crop_roi` invalidates an existing zone. Use `render_zone_overlay.py` to check the zone against a real frame grab. A paw point exactly on the polygon edge counts as inside. |
 | `stationary_px` | Max centroid drift (px) to consider dog "stationary" |
 | `motion_energy_thresh` | Fraction of box pixels changing per frame (0-1) |
 | `dig_sustain_seconds` | Seconds of continuous motion before "digging" fires |
@@ -83,6 +83,7 @@ Each camera needs its own `config-<name>.json`. See `config.example.json` and
 | `off_delay_seconds` | HA `off_delay` for the binary sensors — auto-reverts to OFF this long after the last ON, even if our OFF message is lost (fixes sensors sticking triggered). Default 180 |
 | `min_consecutive` | Consecutive detections required before firing events |
 | `startup_timeout_seconds` | Max seconds to wait for the first camera frame before failing loudly (non-zero exit) instead of hanging forever. Default 60 |
+| `frame_stale_seconds` | If the newest decoded frame is older than this, the camera is treated as stale: detection is skipped and the HA entities go **unavailable** rather than sitting silently at OFF. Default 30. This is what makes a dead RTSP reader visible — a frozen frame is otherwise byte-identical to a static scene. Set 0 to disable. |
 | `mqtt_username` / `mqtt_password` | (Optional) MQTT broker credentials. Can also be set via the `MQTT_USERNAME` / `MQTT_PASSWORD` env vars |
 | `mqtt_tls` | (Optional) Enable TLS for the MQTT connection. Default `false` |
 | `debug_capture_enabled` | (Optional) Archive a low-res + high-res snapshot of every fired event to `debug_capture_dir` for offline review. Default `false`. See "Debug capture" below |
@@ -104,6 +105,44 @@ unauthenticated, which is fine for a broker that never leaves
 localhost/a trusted LAN. If your broker is reachable beyond that (a
 different host, a VPN, etc.), set `mqtt_username`/`mqtt_password` and
 `mqtt_tls: true`.
+
+### Credentials and what reaches the broker / the logs
+
+Camera URLs (`rtsp_url`, `snapshot_url`) embed credentials inline, so this
+project is deliberate about where those strings can end up:
+
+- **Nothing credential-bearing is published to MQTT.** The retained
+  `<base>/geometry` topic carries only `detect_w`, `detect_h` and `crop_roi`.
+  It previously also carried `snapshot_url` — i.e. NVR credentials, on a
+  *retained* topic, on a broker that is unauthenticated by default, replayed to
+  every new subscriber, surfaced in Home Assistant entity attributes, and
+  outliving the container. Nothing ever consumed the field. Because a retained
+  publish replaces the previous message on that topic, simply starting the
+  updated detector once purges the old payload from your broker.
+- **Credentials are redacted before logging.** All log paths that interpolate a
+  URL or a caught subprocess exception go through `redact.py` /
+  `pipeline/dw_redact.py`. This matters most for the non-obvious case:
+  `subprocess.TimeoutExpired` and `CalledProcessError` stringify their entire
+  argv, and the ffmpeg argv always contains the camera URL — so an ordinary
+  camera timeout used to print `rtsp://user:pass@host` into `docker logs`.
+- **The notifier's config and `secrets.json` remain the only homes for
+  credentials**, both gitignored / outside the repo. Lock the latter down with
+  `chmod 600 ~/.openclaw/secrets.json`.
+
+### Availability / staleness
+
+Every auto-discovered entity now has an `availability_topic`
+(`<base>/availability`, retained, with an MQTT Last Will so the *broker*
+publishes `offline` if the detector dies uncleanly). A camera is marked
+unavailable when its newest decoded frame is older than `frame_stale_seconds`.
+
+This closes a genuine blind spot: a sensor sitting at OFF is indistinguishable
+from a detector that has stopped watching. Worse, a frozen frame is
+byte-identical to a static scene, and because `motion_gate_max_idle_seconds`
+forces a detection pass every 10s regardless of motion, a frozen frame that
+happened to contain a dog would re-fire `dog_at_fence` indefinitely. Frames now
+carry a capture timestamp, stale frames are skipped, and the RTSP reader logs
+its reconnects with exponential backoff instead of retrying silently forever.
 
 Set `DOGWATCH_DEBUG=1` in the container environment to log the per-frame
 digging sub-signals (`stationary`, `motion` fraction, held time) so the digging
@@ -170,8 +209,20 @@ The Coral detector only publishes MQTT. The alerting/verification layer lives in
 | File | Runs as | Role |
 |------|---------|------|
 | `dogwatch-notify.py` | systemd user service (`dogwatch-notify.service`) | Subscribes to MQTT, republishes annotated snapshots to HA, keeps a periodic live still (60s), writes an event log |
-| `dogwatch-check.sh` | cron `*/5 * * * *` | Reads the event log, sends a Telegram ping, runs vision model verification (dog presence **and** digging), sends confirm/false-alarm follow-ups |
+| `dogwatch-check.sh` | every 5 min (container entrypoint loop; or cron `*/5 * * * *`) | Thin `flock` wrapper — serialises runs so a long cycle can't be double-processed by the next tick |
+| `dogwatch_check.py` | invoked by the wrapper | All the actual logic: reads the event log, sends a Telegram ping, runs vision model verification (dog presence **and** digging), sends confirm/false-alarm follow-ups, fires the optional siren |
+| `image_quality.py` | imported | Shared grey/partial-decode frame rejection, used by both the notifier and the check script |
 | `dogwatch-notify.config.example.json` | — | Template for the camera registry + Telegram chat id used by the notifier |
+
+**Event bookkeeping.** The check script tracks progress in
+`/tmp/dogwatch-check-state.json` (`{"ts": ..., "offset": ...}`): `ts` is the
+newest event already processed, `offset` is how far into the append-only event
+log it has read, so each cycle parses only new lines. The watermark is advanced
+per completed event and persisted even if a cycle fails partway, so a crash
+re-processes at most one event rather than re-alerting the whole window. A
+legacy bare-float `/tmp/dogwatch-last-ts` is read once on upgrade. Events older
+than `DOGWATCH_MAX_EVENT_AGE` (default 30 min) are ignored so extended downtime
+doesn't replay ancient history.
 
 See **[`pipeline/home-assistant-example.md`](pipeline/home-assistant-example.md)**
 for the Home Assistant side: the auto-discovered entities, optional snapshot-
@@ -210,16 +261,27 @@ environment or a wrapper script):
 
 | Env var | Default | Description |
 |---------|---------|--------------|
-| `DOGWATCH_VISION_API_URL` | Gemini's OpenAI-compatible endpoint | Chat completions endpoint URL |
-| `DOGWATCH_VISION_MODEL` | `gemini-3-flash-preview` | Model name to request |
+| `DOGWATCH_VISION_API_URL` | OpenRouter chat completions endpoint | Primary chat completions endpoint URL |
+| `DOGWATCH_VISION_MODEL` | `qwen/qwen3.7-flash` | Primary model name to request |
 | `DOGWATCH_VISION_API_KEY` | (falls back to `secrets.json`) | API key, sent as a `Bearer` token |
+| `DOGWATCH_VISION_FALLBACK_API_URL` | OpenRouter chat completions endpoint | Fallback endpoint, tried when the primary fails |
+| `DOGWATCH_VISION_FALLBACK_MODEL` | `google/gemini-3-flash-preview` | Fallback model name |
+| `DOGWATCH_VISION_FALLBACK_API_KEY` | (falls back to `secrets.json`) | Fallback API key |
 
-Gemini is the default because its free tier is generous for this usage
-pattern (a handful of image calls every few minutes), but the pin is a
-convenience default, not a hard dependency. If `DOGWATCH_VISION_API_KEY` is
-unset, the script falls back to `models.providers.google.apiKey` in
-`~/.openclaw/secrets.json` for backwards compatibility with existing
-Gemini-only setups.
+The primary is OpenRouter + Qwen (fast, cheap, strong on small objects in wide
+frames); **Gemini is the fallback, not the default** — it moved when the free
+tier started 429ing mid-scan. When a key is unset it is resolved from
+`~/.openclaw/secrets.json`, picking the provider that matches the endpoint
+being called (`models.providers.openrouter.apiKey` for `openrouter.ai`,
+`models.providers.google.apiKey` otherwise), so the key always matches the API.
+
+**The fallback only helps if it is a genuinely different provider.** With the
+defaults, primary and fallback resolve to the same OpenRouter endpoint *and*
+the same key, so an account-level 429 rejects both identically. The check
+script detects that case, logs it, and skips the pointless second call — point
+`DOGWATCH_VISION_FALLBACK_API_URL`/`_API_KEY` at a different provider for a
+fallback that actually adds resilience. Note also that there is **no retry or
+backoff**: each configured provider is attempted exactly once per event.
 
 ### Dog Alarm (optional — siren via Home Assistant)
 
@@ -280,20 +342,29 @@ template.
 
 ## Development
 
-Unit tests cover `tracker.py`, `behavior.py`, and `snapshot_quality.py` (the
-parts with real logic, as opposed to I/O glue). They run on plain Python —
-no Coral hardware or camera feed needed.
+Unit tests cover the parts with real logic, as opposed to I/O glue:
+`tracker.py`, `behavior.py`, `snapshot_quality.py`, `motion_gate.py`,
+`static_suppressor.py`, `event_store.py`, `debug_capture.py`, `detector.py`'s
+tensor bookkeeping and bbox clamping, `frame_grabber.py`'s staleness/backoff
+signalling, `redact.py`, and `pipeline/dogwatch_check.py`'s watermark, read-offset
+and dedupe logic. They run on plain Python — no Coral hardware or camera feed
+needed.
 
 ```bash
 pip install -r requirements-test.txt
 pytest tests/ -v
 ```
 
-CI (`.github/workflows/ci.yml`) runs on every push/PR to `main`: unit tests,
-a `py_compile` syntax check across all modules, a `bash -n` check on the
-`pipeline/*.sh` scripts, and a full `linux/amd64` Docker image build (no
-Coral hardware available in CI, so this only verifies the image builds and
-installs cleanly — not that inference actually works).
+`detector.py` imports `ai_edge_litert` lazily (inside `_make_interpreter`), so
+its pure-Python helpers are testable without installing the ML runtime — which
+is why `requirements-test.txt` doesn't include it.
+
+CI (`.github/workflows/ci.yml`) runs on every push/PR to `main`: unit tests, a
+`compileall` syntax check across **every** module (the previous hand-maintained
+list silently omitted six files, including the ~870-line `find-dogs.py`), a
+`bash -n` check plus an advisory `shellcheck` pass on the shell scripts, and a
+full `linux/amd64` build of both Docker images (no Coral hardware in CI, so this
+only verifies the images build and install cleanly — not that inference works).
 
 ### On-hardware detection smoke test
 
