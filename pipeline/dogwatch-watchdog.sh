@@ -15,11 +15,20 @@
 #
 # Runs as misaunders via dogwatch-watchdog.timer (every 2 min).
 # Log: /tmp/dogwatch-watchdog.log (matches dogwatch daily-export convention).
+#
+# Env overrides: DOGWATCH_COMPOSE_DIR (where docker-compose.yml lives),
+# DOGWATCH_WATCHDOG_LOG, DOGWATCH_WATCHDOG_STATE_DIR,
+# DOGWATCH_HEALTH_RESTART_MIN_INTERVAL.
 
 set -u
 
-LOG=/tmp/dogwatch-watchdog.log
-COMPOSE_DIR=/home/misaunders/source/dogTracker
+LOG="${DOGWATCH_WATCHDOG_LOG:-/tmp/dogwatch-watchdog.log}"
+# Overridable rather than a hardcoded home directory: this script is run by a
+# systemd timer as a specific user, and the baked-in /home/<user> path meant
+# anyone else deploying it (or the same user after a move) got a silent
+# failure — every `docker compose` call runs in the wrong directory and the
+# watchdog reports nothing to restart while the stack stays down.
+COMPOSE_DIR="${DOGWATCH_COMPOSE_DIR:-/home/misaunders/source/dogTracker}"
 MAX_LOG_BYTES=102400   # ~100KB, then trim
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
