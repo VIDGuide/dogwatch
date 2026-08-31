@@ -41,8 +41,21 @@ CASES = [
     ("rtsp://bob:@cam.lan/stream", "rtsp://***:***@cam.lan/stream"),
     # No credentials -> untouched.
     ("rtsp://cam.lan:554/stream", "rtsp://cam.lan:554/stream"),
-    ("https://api.telegram.org/botTOKEN/sendMessage",
-     "https://api.telegram.org/botTOKEN/sendMessage"),
+    # Telegram carries the bot token in the URL *path*, and requests puts the
+    # request URL in its exception text — so this had to become a redacted
+    # case, not an untouched one.
+    ("https://api.telegram.org/bot8123456:AAH-xY_9qZ/sendMessage",
+     "https://api.telegram.org/bot***:***/sendMessage"),
+    ("https://api.telegram.org/bot8123456:AAH-xY_9qZ/sendPhoto",
+     "https://api.telegram.org/bot***:***/sendPhoto"),
+    # The real leak shape: a requests ConnectionError, which embeds the path.
+    ("HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries "
+     "exceeded with url: /bot8123456:AAH-xY_9qZ/sendMessage (Caused by ...)",
+     "HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries "
+     "exceeded with url: /bot***:***/sendMessage (Caused by ...)"),
+    # Not a token shape -> left alone, so ordinary paths survive.
+    ("https://example.test/bots/list", "https://example.test/bots/list"),
+    ("https://example.test/bothersome", "https://example.test/bothersome"),
     ("", ""),
 ]
 
@@ -110,3 +123,36 @@ class TestSubprocessExceptionLeak:
         raw = str(exc)
         assert "s3cret" in raw, "precondition: the exception really does leak"
         assert "s3cret" not in mod.redact(exc)
+
+
+@pytest.mark.parametrize("mod", BOTH, ids=["root", "pipeline"])
+class TestTelegramTokenLeak:
+    """The second leak of the same shape: ``requests`` embeds the request URL
+    in its exception text, and the Telegram Bot API puts the bot token in the
+    URL path. So ``print(f'TG send error: {e}')`` on a routine network failure
+    published a live bot token (full control of the bot) to the log.
+
+    find-dogs.py is the requests-based Telegram caller; dogwatch-notify.py and
+    dogwatch_check.py use urllib, whose URLError carries only the errno.
+    """
+
+    TOKEN = "8123456789:AAHrealLookingTokenValue_x-9"
+
+    def test_requests_exception_url_is_redacted(self, mod):
+        requests = pytest.importorskip("requests")
+        url = f"https://127.0.0.1:9/bot{self.TOKEN}/sendMessage"
+        try:
+            requests.post(url, json={}, timeout=1)
+        except Exception as exc:  # ConnectionError in practice
+            raw = str(exc)
+            assert self.TOKEN in raw, "precondition: requests really does leak the URL"
+            out = mod.redact(exc)
+            assert self.TOKEN not in out
+            assert "/bot***:***/sendMessage" in out
+        else:
+            pytest.fail("expected the connection to 127.0.0.1:9 to fail")
+
+    def test_token_alone_is_not_mistaken_for_a_url(self, mod):
+        # A bare token with no /bot prefix is not something we can recognise;
+        # documented so the limitation is deliberate rather than a surprise.
+        assert mod.redact(self.TOKEN) == self.TOKEN

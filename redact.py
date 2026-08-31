@@ -41,12 +41,30 @@ _CREDS_RE = re.compile(
     r"@"                               # literal @ terminating userinfo
 )
 
+# Telegram puts the bot token in the URL *path*, not in userinfo and not in a
+# header — ``https://api.telegram.org/bot<token>/sendMessage`` is the only
+# form the Bot API offers, so there is nothing to fix at the call site.
+#
+# That matters because ``requests`` embeds the full request URL in its
+# exception text: a ConnectionError reads
+# ``HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries
+# exceeded with url: /bot<TOKEN>/sendMessage (Caused by ...)``. So the routine
+# "internet blipped" failure printed a live bot token — full control of the
+# bot, and the same class of leak as the RTSP credentials above.
+#
+# A token is always ``<bot_id>:<auth_string>``. Requiring that shape after
+# ``/bot`` keeps this from matching ordinary paths like ``/bots/list``.
+# (``urllib`` callers don't have the leak — URLError's str() carries only the
+# errno — but the pattern lives here so any future move to requests is safe.)
+_TG_TOKEN_RE = re.compile(r"(/bot)(\d+:[A-Za-z0-9_\-]+)")
+
 
 def redact_url(value):
-    """Return *value* as a string with any ``user:pass@`` userinfo masked.
+    """Return *value* as a string with any embedded credential masked.
 
-    Non-string input is coerced with ``str()`` first, which is what makes
-    this safe to wrap around an exception object:
+    Handles ``user:pass@`` userinfo and Telegram ``/bot<token>/`` path
+    segments. Non-string input is coerced with ``str()`` first, which is what
+    makes this safe to wrap around an exception object:
 
     >>> redact_url("rtsp://bob:hunter2@cam.lan:554/Streaming/Channels/1201")
     'rtsp://***:***@cam.lan:554/Streaming/Channels/1201'
@@ -54,13 +72,16 @@ def redact_url(value):
     'rtsp://***:***@cam.lan/stream'
     >>> redact_url("rtsp://cam.lan/stream")
     'rtsp://cam.lan/stream'
+    >>> redact_url("https://api.telegram.org/bot8123:AAH-xY_9q/sendMessage")
+    'https://api.telegram.org/bot***:***/sendMessage'
     """
     try:
         text = value if isinstance(value, str) else str(value)
     except Exception:
         return "<unprintable>"
     try:
-        return _CREDS_RE.sub(rf"\1{PLACEHOLDER}@", text)
+        text = _CREDS_RE.sub(rf"\1{PLACEHOLDER}@", text)
+        return _TG_TOKEN_RE.sub(rf"\1{PLACEHOLDER}", text)
     except Exception:
         # Regex can't realistically fail here, but a redaction helper must
         # never be the reason an error path crashes.
