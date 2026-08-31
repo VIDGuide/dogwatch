@@ -6,7 +6,7 @@
       "detect_w": 640,
       "detect_h": 480
     },
-    "_comment_camera": "detect_w/detect_h/crop_roi here MUST always match this camera's crop_roi and rtsp_url resolution in the container's own config.json. If config.json's crop_roi or stream resolution changes, update this entry too \u2014 see README 'Keeping the notifier in sync'.",
+    "_comment_camera": "detect_w/detect_h/crop_roi here MUST match this camera's crop_roi and post-crop detection resolution in the container's own config.json, because the notifier scales bounding boxes with them. If config.json's crop_roi or stream resolution changes, update this entry too. The detector also publishes its actual geometry to the retained MQTT topic <base>/geometry (detect_w, detect_h, crop_roi) — check that topic to confirm the real values. Note: keys starting with '_' in this 'cameras' object are treated as comments and ignored.",
     "rear-east": {
       "snapshot_url": "http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture",
       "snapshot_rtsp_fallback": "rtsp://user:pass@nvr-ip:554/Streaming/Channels/1201",

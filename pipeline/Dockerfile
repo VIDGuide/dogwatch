@@ -15,10 +15,14 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY dogwatch-notify.py /app/
 COPY dogwatch-check.sh /app/
+COPY dogwatch_check.py /app/
 COPY dog-alarm.sh /app/
 COPY find-dogs.py /app/
 COPY find-dogs-mqtt.py /app/
 COPY stats.py /app/
+# Shared helper modules imported by the scripts above.
+COPY dw_redact.py /app/
+COPY image_quality.py /app/
 RUN chmod +x /app/dogwatch-check.sh /app/dog-alarm.sh /app/find-dogs.py /app/find-dogs-mqtt.py
 
 WORKDIR /app

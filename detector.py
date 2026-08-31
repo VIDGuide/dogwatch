@@ -22,7 +22,6 @@ SSD-style detection model is loaded.
 import platform
 
 import cv2
-from ai_edge_litert.interpreter import Interpreter, load_delegate
 
 _EDGETPU_SHARED_LIB = {
     "Linux": "libedgetpu.so.1",
@@ -32,7 +31,18 @@ _EDGETPU_SHARED_LIB = {
 
 
 def _make_interpreter(model_path):
-    """Load *model_path* with the Edge TPU delegate attached."""
+    """Load *model_path* with the Edge TPU delegate attached.
+
+    ``ai_edge_litert`` is imported here rather than at module scope so the
+    pure-Python parts of this module (tensor bookkeeping in ``_get_objects`` /
+    ``_set_resized_input``, bbox clamping, label parsing) can be imported and
+    unit tested without the ML runtime installed. Those helpers are
+    reimplementations of pycoral logic and are exactly the parts worth testing
+    off-hardware — but the module-level import meant ``tests/test_detector.py``
+    could not even be collected, so CI skipped the whole file.
+    """
+    from ai_edge_litert.interpreter import Interpreter, load_delegate
+
     delegate = load_delegate(_EDGETPU_SHARED_LIB)
     return Interpreter(model_path=model_path, experimental_delegates=[delegate])
 
@@ -119,6 +129,31 @@ def _get_objects(interpreter, score_threshold, image_scale):
     return out
 
 
+def _clamp_bbox(bbox, width, height):
+    """Clip *bbox* to the frame and return None if nothing is left.
+
+    Model output needs clamping for a specific structural reason:
+    ``_set_resized_input`` preserves aspect ratio by scaling to fit and
+    **zero-padding the right/bottom**. A box the model predicts partly inside
+    that padding region maps back to coordinates beyond ``width``/``height``
+    (and rounding can push an edge slightly negative).
+
+    Left unclamped that matters downstream, because BehaviorMonitor's paw
+    point is the bbox *bottom-centre*: an out-of-frame bottom edge places the
+    paw point outside the fence polygon and the event is silently missed. The
+    out-of-range box was also written to SQLite and published over MQTT, where
+    any consumer scaling by ``frame_w``/``frame_h`` would draw it off-image.
+    """
+    x0, y0, x1, y1 = bbox
+    x0 = max(0, min(int(x0), width))
+    y0 = max(0, min(int(y0), height))
+    x1 = max(0, min(int(x1), width))
+    y1 = max(0, min(int(y1), height))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1, y1)
+
+
 class DogDetector:
     def __init__(self, model_path, labels_path, score_threshold=0.4,
                  target_label="dog"):
@@ -143,13 +178,21 @@ class DogDetector:
         return labels
 
     def detect(self, frame):
-        """Return [{'bbox': (x0,y0,x1,y1) in pixels, 'score': float}, ...]."""
+        """Return [{'bbox': (x0,y0,x1,y1) in pixels, 'score': float}, ...].
+
+        Boxes are clamped to the frame; see _clamp_bbox for why that matters.
+        """
         h, w = frame.shape[:2]
         scale = _set_resized_input(
             self.interp, (w, h), lambda size: cv2.resize(frame, size))
         self.interp.invoke()
         out = []
         for obj in _get_objects(self.interp, self.score_threshold, scale):
-            if obj["id"] in self.target_ids:
-                out.append({"bbox": obj["bbox"], "score": obj["score"]})
+            if obj["id"] not in self.target_ids:
+                continue
+            bbox = _clamp_bbox(obj["bbox"], w, h)
+            if bbox is None:
+                # Entirely outside the frame (pure padding artefact).
+                continue
+            out.append({"bbox": bbox, "score": obj["score"]})
         return out

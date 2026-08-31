@@ -26,11 +26,22 @@ class Publisher:
         self._port = port
         self._ha_discovery = ha_discovery
         self._geometry = None  # set via publish_geometry() before first event
+        # Availability ("is the detector actually watching this camera?") is
+        # separate from the event state topics: a sensor sitting at OFF is
+        # indistinguishable from a detector that died, which is precisely the
+        # silent-failure mode this exists to surface. See set_available().
+        self.availability_topic = f"{self.base}/availability"
+        self._available = None  # None = not yet reported, so first call publishes
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if username:
             self.client.username_pw_set(username, password)
         if use_tls:
             self.client.tls_set()
+        # Last Will and Testament: if this process dies or the socket drops
+        # without a clean DISCONNECT, the *broker* publishes "offline" on our
+        # behalf. Without this, a hard crash leaves a retained "online" that
+        # never gets corrected and HA keeps trusting a dead detector.
+        self.client.will_set(self.availability_topic, "offline", retain=True)
         # Survive broker restarts / dropped TCP.  Older paho-mqtt releases
         # could otherwise crash their network thread with "'NoneType' object
         # has no attribute 'recv'" and never recover — which silently kills
@@ -39,7 +50,17 @@ class Publisher:
         self.client.reconnect_delay_set(min_delay=1, max_delay=60)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
-        self.client.connect(host, port, 60)
+        # connect_async + loop_start, NOT connect(): a synchronous connect()
+        # raises when the broker isn't up yet, and the caller's only sane
+        # response was to give up and set pub = None — permanently, because
+        # the reconnect machinery below never got armed. A broker that boots
+        # a few seconds after this container therefore disabled all MQTT
+        # output until someone manually restarted us, with the detector
+        # continuing to run blind. connect_async never raises here; the
+        # network thread owns the initial connection *and* every retry, so
+        # "broker down at startup" and "broker down later" are now the same
+        # (recoverable) code path.
+        self.client.connect_async(host, port, 60)
         self.client.loop_start()
         self._start_supervisor()
 
@@ -49,6 +70,11 @@ class Publisher:
         # broker restarts and retained configs stay fresh.
         if self._ha_discovery:
             self._publish_discovery()
+        # Re-assert availability after every reconnect: the broker may have
+        # published our LWT "offline" while we were away, and a retained
+        # "offline" would otherwise stick until the next state change.
+        self._available = None
+        self.set_available(True)
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
         if reason_code != 0:
@@ -60,14 +86,25 @@ class Publisher:
         reconnect_delay_set handles the common case, but if paho's loop thread
         dies outright (the 'NoneType recv' bug) is_connected() stays False
         forever.  This polls and calls reconnect() to guarantee recovery.
+
+        This now also covers "never connected in the first place" (broker not
+        yet up when we started). connect_async's own retry loop normally
+        handles that, so this is belt-and-braces — but it means there is no
+        longer *any* path where a startup-time broker outage is permanent.
+        The log line distinguishes the two cases so a genuinely unreachable
+        broker is diagnosable rather than looking like a flapping connection.
         """
         def _watch():
+            ever_connected = False
             while True:
                 time.sleep(30)
                 try:
-                    if not self.client.is_connected():
-                        print(f"[{self.camera_name}] MQTT not connected \u2014 reconnecting")
-                        self.client.reconnect()
+                    if self.client.is_connected():
+                        ever_connected = True
+                        continue
+                    state = "reconnecting" if ever_connected else "still waiting for first connect"
+                    print(f"[{self.camera_name}] MQTT not connected \u2014 {state}")
+                    self.client.reconnect()
                 except Exception as e:
                     print(f"[{self.camera_name}] MQTT reconnect attempt failed: {e}")
         threading.Thread(target=_watch, daemon=True).start()
@@ -78,8 +115,8 @@ class Publisher:
             ("dog_at_fence", f"{cam} Dog at fence", f"{self.base}/dog_at_fence"),
             ("dog_digging", f"{cam} Dog digging", f"{self.base}/digging"),
         ]
+        dev_id = f"dogwatch_{cam}"
         for slug, display_name, state_topic in sensors:
-            dev_id = f"dogwatch_{cam}"
             cfg = {
                 "name": display_name,
                 "state_topic": state_topic,
@@ -87,6 +124,9 @@ class Publisher:
                 "payload_on": "ON",
                 "payload_off": "OFF",
                 "device_class": "motion",
+                "availability_topic": self.availability_topic,
+                "payload_available": "online",
+                "payload_not_available": "offline",
                 # HA-side safety net: auto-revert to OFF this many seconds after
                 # the last ON, even if our OFF message is never delivered (e.g.
                 # container restart mid-event).  This is the durable fix for
@@ -107,6 +147,9 @@ class Publisher:
             "name": f"{cam} Dogwatch",
             "topic": f"{self.base}/snapshot",
             "unique_id": f"{dev_id}_snapshot",
+            "availability_topic": self.availability_topic,
+            "payload_available": "online",
+            "payload_not_available": "offline",
             "device": {"identifiers": [dev_id], "name": f"Dogwatch {cam}"},
         }
         self.client.publish(
@@ -123,12 +166,29 @@ class Publisher:
                 f"{self.base}/geometry",
                 json.dumps(self._geometry), retain=True)
 
-    def publish_geometry(self, detect_w, detect_h, crop_roi=None, snapshot_url=None):
+    def publish_geometry(self, detect_w, detect_h, crop_roi=None):
         """Publish (retained) the detector's resolution and crop config.
 
         Called once by CameraPipeline after init, and again on every
-        reconnect (via _publish_discovery). The notifier reads this to
-        correctly map bounding boxes onto its own snapshot.
+        reconnect (via _publish_discovery), so a consumer can map bounding
+        boxes onto its own snapshot without a hand-maintained copy of the
+        detector's resolution.
+
+        **Deliberately carries no credentials.** This used to include the
+        camera's ``snapshot_url``, whose documented form is
+        ``http://user:pass@nvr-ip/ISAPI/...`` — so NVR credentials were
+        written to a *retained* topic on a broker that is plaintext and
+        unauthenticated by default. Retained means the message outlived the
+        container, was replayed to every new subscriber, and surfaced in Home
+        Assistant entity attributes (and therefore in HA backups and
+        diagnostics downloads). Nothing ever consumed the field: the notifier
+        resolves snapshot URLs from its own gitignored config file, so this
+        was pure liability.
+
+        Because a retained publish *replaces* the previous retained message
+        on the same topic, the first call after this change also purges the
+        credential-bearing payload from the broker. No manual cleanup needed
+        beyond letting the detector start once.
         """
         self._geometry = {
             "detect_w": detect_w,
@@ -136,11 +196,27 @@ class Publisher:
         }
         if crop_roi:
             self._geometry["crop_roi"] = list(crop_roi)
-        if snapshot_url:
-            self._geometry["snapshot_url"] = snapshot_url
         self.client.publish(
             f"{self.base}/geometry",
             json.dumps(self._geometry), retain=True)
+
+    def set_available(self, available):
+        """Publish (retained) detector availability, but only on a change.
+
+        HA consumes this via ``availability_topic`` on every entity, so a
+        stale/dead detector shows up as *unavailable* rather than as a
+        permanently-OFF sensor. Called with False when the frame grabber goes
+        stale (see CameraPipeline.tick) and True once frames resume.
+
+        Change-gated so a per-frame caller doesn't republish on every tick.
+        """
+        available = bool(available)
+        if self._available == available:
+            return
+        self._available = available
+        payload = "online" if available else "offline"
+        self.client.publish(self.availability_topic, payload, retain=True)
+        print(f"[{self.camera_name}] availability -> {payload}")
 
     def snapshot(self, jpeg_bytes, capture_ts=None):
         """Publish an annotated JPEG frame to the snapshot topic (retained).

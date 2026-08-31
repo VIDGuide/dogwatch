@@ -49,6 +49,8 @@ import time
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageStat
 
+from dw_redact import redact
+
 # ---------------------------------------------------------------------------
 # Paths / config resolution (same order as dogwatch-check.sh / dog-alarm.sh)
 # ---------------------------------------------------------------------------
@@ -267,10 +269,15 @@ def grab_frame(channel, nvr, out_path):
                 picked.save(out_path, quality=92)
                 return True
         except subprocess.TimeoutExpired:
+            # Deliberately does not interpolate the exception: its str()
+            # embeds the whole argv, including rtsp://user:pass@host.
             print(f'  ch{channel}: grab timeout (attempt {attempt + 1})',
                   file=sys.stderr)
         except Exception as e:
-            print(f'  ch{channel}: grab error (attempt {attempt + 1}): {e}',
+            # redact(): CalledProcessError (raised by check=True above) also
+            # stringifies the full argv, so this branch leaked the NVR
+            # credentials even though the timeout branch above was careful.
+            print(f'  ch{channel}: grab error (attempt {attempt + 1}): {redact(e)}',
                   file=sys.stderr)
         time.sleep(0.5)
     return False

@@ -21,22 +21,25 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements-test.txt
 
+      # Compile *every* module, not a hand-maintained subset. The previous
+      # explicit list silently omitted static_suppressor.py, export-daily-events.py,
+      # render_zone_overlay.py, pipeline/stats.py, pipeline/find-dogs.py and
+      # pipeline/find-dogs-mqtt.py — find-dogs.py alone is ~870 lines that were
+      # never even syntax-checked.
       - name: Syntax check all Python modules
         run: |
-          python -m py_compile \
-            dogwatch.py mqtt_publisher.py detector.py tracker.py behavior.py \
-            camera_pipeline.py frame_grabber.py snapshot_quality.py \
-            motion_gate.py event_store.py debug_capture.py \
-            pipeline/dogwatch-notify.py
+          python -m compileall -q . -x '(\.git|__pycache__)'
 
+      # test_detector.py is no longer excluded: detector.py now imports
+      # ai_edge_litert lazily (inside _make_interpreter), so its pure-Python
+      # tensor bookkeeping is importable and testable without the ML runtime.
       - name: Run unit tests
         run: |
           python -m pytest tests/ -v \
             --ignore=tests/hardware_smoke_test.py \
             --ignore=tests/probe_image.py \
             --ignore=tests/gemini_image_quality_check.py \
-            --ignore=tests/gemini_batch_label.py \
-            --ignore=tests/test_detector.py
+            --ignore=tests/gemini_batch_label.py
 
   docker-build:
     name: Docker image build (amd64)
@@ -71,7 +74,22 @@ jobs:
 
       - name: bash -n syntax check
         run: |
-          for f in pipeline/*.sh; do
+          for f in pipeline/*.sh *.sh; do
+            [ -e "$f" ] || continue
             echo "Checking $f"
             bash -n "$f"
           done
+
+      # bash -n only catches parse errors. shellcheck catches the class of bug
+      # that actually bit here: dog-alarm.sh called bump_stats ~100 lines before
+      # it was defined, so both early-exit paths emitted "command not found" and
+      # never recorded the two most interesting failure counters.
+      #
+      # Advisory for now (|| true): the existing scripts have not been triaged
+      # against shellcheck yet, and a hard gate would fail on pre-existing
+      # findings unrelated to a given PR. Promote to blocking (drop `|| true`)
+      # once the backlog is clean.
+      - name: shellcheck (advisory)
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck --severity=warning pipeline/*.sh *.sh || true

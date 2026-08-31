@@ -49,8 +49,35 @@ class BehaviorMonitor:
         return ((x0 + x1) / 2.0, y1)                # bottom-centre = ground contact
 
     def in_zone(self, bbox):
+        # `covers`, not `contains`: contains() excludes the polygon boundary,
+        # so a dog whose paw point landed exactly on a zone edge counted as
+        # outside. That is not a hypothetical — the default zone in
+        # config.example.json is the full frame ([[0,0],[1,0],[1,1],[0,1]]),
+        # which makes the polygon edge exactly y == frame_h, and the paw point
+        # is the bbox *bottom* edge. Any dog detected at the bottom of the
+        # frame therefore sat precisely on the excluded boundary.
         px, py = self.paw_point(bbox)
-        return self.zone.contains(Point(px, py))
+        return self.zone.covers(Point(px, py))
+
+    def observe_frame(self, gray):
+        """Record *gray* as the baseline for the next intra-box motion diff.
+
+        Call this for every frame the pipeline decodes and considers usable,
+        **including frames the motion gate suppresses**. ``evaluate()`` also
+        updates the baseline, so between them ``prev_gray`` always holds the
+        immediately-preceding good frame.
+
+        Why this exists: ``evaluate()`` only runs on frames that passed the
+        motion gate, and it was the only thing advancing ``prev_gray``. With
+        ``motion_gate_max_idle_seconds`` forcing a pass every 10s in a quiet
+        scene, ``intra_box_motion`` was comparing frames up to *ten seconds*
+        apart. Ten seconds of accumulated change inside a bbox trivially
+        clears ``motion_energy_thresh``, so the "busy box" half of the digging
+        signal was inflated precisely in the low-motion regime the gate
+        creates — making the threshold nearly untunable, since its effective
+        meaning depended on the gate's duty cycle.
+        """
+        self.prev_gray = gray
 
     def intra_box_motion(self, gray, bbox):
         """Fraction of pixels inside the dog's box that changed vs last frame."""
@@ -115,7 +142,27 @@ class BehaviorMonitor:
                 tr.dig_since = None
 
         self.prev_gray = gray
+        self._prune_cooldowns(tracks, now)
         return events
+
+    def _prune_cooldowns(self, tracks, now):
+        """Drop cooldown entries for tracks that are gone and long expired.
+
+        ``_last_event`` is keyed by ``(event_type, track_id)`` and track ids
+        increment monotonically forever, so without pruning every track that
+        ever fired an event left a permanent entry — an unbounded dict on a
+        process designed to run for months. An entry is only removed once its
+        track no longer exists *and* its cooldown has fully expired, so
+        pruning can never let a suppressed event through early.
+        """
+        if not self._last_event:
+            return
+        stale = [
+            key for key, ts in self._last_event.items()
+            if key[1] not in tracks and (now - ts) > self.cooldown
+        ]
+        for key in stale:
+            del self._last_event[key]
 
     def _maybe_emit(self, events, etype, tid, bbox, score, now):
         key = (etype, tid)

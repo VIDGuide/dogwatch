@@ -9,4 +9,10 @@ pytest==8.4.2
 numpy==2.5.1
 opencv-python-headless==5.0.0.93
 shapely==2.1.2
-ai-edge-litert==2.1.6
+# Pillow: pipeline/image_quality.py (shared by dogwatch-notify.py and
+# dogwatch_check.py) is PIL-based, matching pipeline/requirements.txt.
+Pillow==12.3.0
+# NOTE: ai-edge-litert is deliberately NOT installed here. detector.py imports
+# it lazily inside _make_interpreter, so tests exercise the pure-Python tensor
+# bookkeeping without pulling a large ML runtime into every CI run. The
+# Dockerfile build job already verifies the pinned version installs cleanly.
