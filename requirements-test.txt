@@ -12,6 +12,13 @@ shapely==2.1.2
 # Pillow: pipeline/image_quality.py (shared by dogwatch-notify.py and
 # dogwatch_check.py) is PIL-based, matching pipeline/requirements.txt.
 Pillow==12.3.0
+# requests + paho-mqtt: tests/test_score_threshold.py imports dogwatch, which
+# imports camera_pipeline (requests) and mqtt_publisher (paho-mqtt). Missing
+# since the per-camera score_threshold PR; stacked branches never ran CI, so
+# this only surfaced when main's suite ran in full. Versions match the
+# detector image's pins (Dockerfile / pipeline/requirements.txt).
+requests==2.34.2
+paho-mqtt==2.1.0
 # NOTE: ai-edge-litert is deliberately NOT installed here. detector.py imports
 # it lazily inside _make_interpreter, so tests exercise the pure-Python tensor
 # bookkeeping without pulling a large ML runtime into every CI run. The
