@@ -54,6 +54,61 @@ def warn_on_shared_key_conflicts(cfgs, names):
                       f"model. (score_threshold, by contrast, IS per-camera.)")
 
 
+def check_topic_collisions(cfgs, names, env=None):
+    """Fail fast when two cameras would publish to the same MQTT base topic.
+
+    Every camera needs its own base topic. The HA discovery payloads are keyed
+    per camera (``dev_id = dogwatch_<name>``), so two cameras sharing a base
+    topic register two *distinct* pairs of entities that both subscribe to the
+    *same* state topic — camera A's dog turns on camera B's sensor, and their
+    retained snapshots overwrite each other. Nothing about that is recoverable
+    or visible from the Home Assistant side; it just looks like both cameras
+    see everything.
+
+    There are two routes into it, and neither used to be checked:
+
+    1. ``MQTT_TOPIC`` in the environment. ``CameraPipeline`` reads it as
+       ``os.environ.get("MQTT_TOPIC", cfg["mqtt_base_topic"])``, so it is a
+       *single global value overriding a per-camera setting*. Setting it with
+       more than one camera configured silently collapses the whole fleet onto
+       one topic. (``MQTT_HOST``/``MQTT_PORT`` are genuinely global — one
+       broker — so they are deliberately not checked here.)
+    2. Two config files that simply both say the same ``mqtt_base_topic``.
+
+    Raising rather than warning: this is a misconfiguration whose only symptom
+    is wrong data, and it is cheaper to refuse at startup than to debug "why
+    does the front camera trigger when the dog is out the back".
+    """
+    env = os.environ if env is None else env
+    if len(cfgs) < 2:
+        return
+
+    override = env.get("MQTT_TOPIC")
+    if override:
+        raise ValueError(
+            f"MQTT_TOPIC={override!r} is set in the environment, but "
+            f"{len(cfgs)} cameras are configured ({', '.join(names)}). "
+            f"MQTT_TOPIC is a single global value and would override every "
+            f"camera's per-camera mqtt_base_topic, collapsing the whole fleet "
+            f"onto one topic. Unset MQTT_TOPIC and set mqtt_base_topic in each "
+            f"config instead (e.g. 'dogwatch' and 'dogwatch/rear-east')."
+        )
+
+    seen = {}
+    for cfg, name in zip(cfgs, names):
+        topic = cfg.get("mqtt_base_topic")
+        if topic is None:
+            continue
+        if topic in seen:
+            raise ValueError(
+                f"Cameras {seen[topic]!r} and {name!r} both use "
+                f"mqtt_base_topic={topic!r}. Each camera needs its own base "
+                f"topic, or their Home Assistant entities and snapshots will "
+                f"overwrite each other."
+            )
+        seen[topic] = name
+
+
 def build_pipelines(cfgs, names, factory=None, log=print):
     """Construct one pipeline per camera, isolating per-camera startup failures.
 
@@ -131,6 +186,10 @@ def main():
     # Silently ignoring a second camera's model_path is the kind of thing that
     # wastes an afternoon, so say so out loud.
     warn_on_shared_key_conflicts(cfgs, names)
+
+    # Two cameras publishing to one base topic is silently destructive, and
+    # MQTT_TOPIC in the environment is a global override for a per-camera key.
+    check_topic_collisions(cfgs, names)
 
     # Per-camera detection thresholds.
     #
@@ -222,7 +281,15 @@ def main():
                         last_err_log[pipe.name] = t0
                         print(f"[{pipe.name}] tick failed ({n} total): "
                               f"{type(exc).__name__}: {redact(exc)}", flush=True)
-                        traceback.print_exc()
+                        # format_exc() + redact(), not print_exc(): the
+                        # traceback's final line is the exception message, and a
+                        # cv2/requests error raised from the frame grabber or the
+                        # snapshot fetch embeds the credential-bearing camera
+                        # URL. print_exc() writes straight to stderr with no
+                        # chance to redact, so the message above was masked while
+                        # the identical string leaked one line below it. See
+                        # redact.py's module docstring for the rule.
+                        print(redact(traceback.format_exc()), flush=True)
 
             dt = time.time() - t0
             if beat.should_write(t0):
