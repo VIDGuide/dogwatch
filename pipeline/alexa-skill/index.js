@@ -41,6 +41,30 @@ const https = require('https');
 const HA_WEBHOOK_URL =
   'https://YOUR-INSTANCE.ui.nabu.casa/api/webhook/dogwatch_find_dogs_skill';
 
+// Shared secret sent as X-Dogwatch-Token on the webhook POST.
+//
+// Why: an HA webhook has no authentication of its own. Its only protection is
+// that the URL is unguessable, and that URL is a bearer credential that leaks
+// like one — it sits in this file, in Alexa's build logs, and in the HA
+// automation. Anyone who obtains it can trigger a full camera scan (which
+// spends vision-API quota and announces on your Echos) as often as they like.
+//
+// Set this to a long random value and have the HA automation drop any request
+// whose token doesn't match — see SETUP.md for the condition to add. Leave it
+// empty to keep the previous URL-only behaviour.
+const WEBHOOK_SHARED_SECRET = '';
+
+// Your skill's application id (Alexa developer console -> your skill ->
+// "Your Skill ID", looks like amzn1.ask.skill.xxxxxxxx-...).
+//
+// Alexa-hosted skills are invoked as Lambda functions by the Alexa service
+// itself, so the request-signature checks that a self-hosted HTTPS endpoint
+// must perform do not apply here — there is no HTTP request for us to verify.
+// Verifying the application id is the control that *does* apply: it is what
+// stops another skill (or a stray test invocation) that somehow reaches this
+// function from driving your cameras. Leave empty to skip the check.
+const EXPECTED_APPLICATION_ID = '';
+
 // Camera slot id (from the CAMERA slot type) -> NVR channel id.
 const SLOT_ID_TO_CHANNEL = {
   back_gate: 14,
@@ -100,13 +124,17 @@ function postJson(body) {
     const done = () => {
       if (!settled) { settled = true; resolve(); }
     };
+    const headers = {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload),
+    };
+    if (WEBHOOK_SHARED_SECRET) {
+      headers['X-Dogwatch-Token'] = WEBHOOK_SHARED_SECRET;
+    }
     try {
       const req = https.request(HA_WEBHOOK_URL, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload),
-        },
+        headers,
         timeout: 6000,
       }, (res) => {
         res.resume(); // drain
@@ -122,6 +150,27 @@ function postJson(body) {
   });
 }
 
+// SSML is XML, so anything interpolated into it has to be escaped.
+//
+// The only untrusted input here is the CAMERA slot's spoken text, which lands
+// in the ack line via CAMERA_ACK_LINES. Alexa normally hands back clean words,
+// but the slot value is transcribed user speech echoed straight back into
+// markup: a value containing '<', '>' or '&' produced malformed XML, and
+// Alexa's response to malformed SSML is to fail the whole response — so the
+// user hears nothing at all, even though the scan was already triggered. A
+// value shaped like a tag would be interpreted as speech markup rather than
+// spoken (e.g. injecting <audio src="..."> or <break>).
+function escapeSsml(text) {
+  return String(text == null ? '' : text)
+    .replace(/&/g, '&amp;')   // must be first
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// speak() takes *already-escaped* SSML so the canned lines can keep using
+// markup if they ever need to; escapeSsml is applied at each interpolation.
 function speak(ssml) {
   return {
     version: '1.0',
@@ -149,8 +198,8 @@ function resolveChannel(intent) {
   const resolutions =
     slot.resolutions && slot.resolutions.resolutionsPerAuthority;
   if (resolutions && resolutions[0] && resolutions[0].values &&
-      resolutions[0].values[0] && resolutions[0].values[0].value &&
-      resolutions[0].values[0].value.id) {
+    resolutions[0].values[0] && resolutions[0].values[0].value &&
+    resolutions[0].values[0].value.id) {
     const id = resolutions[0].values[0].value.id;
     if (SLOT_ID_TO_CHANNEL[id]) return SLOT_ID_TO_CHANNEL[id];
   }
@@ -160,7 +209,24 @@ function resolveChannel(intent) {
   return NAME_TO_CHANNEL[spoken] || null;
 }
 
+function applicationId(event) {
+  // Present on context.System for all request types; session.application only
+  // exists on session-based requests, so check context first.
+  const ctx = event.context && event.context.System
+    && event.context.System.application;
+  if (ctx && ctx.applicationId) return ctx.applicationId;
+  const sess = event.session && event.session.application;
+  return (sess && sess.applicationId) || '';
+}
+
 exports.handler = async (event) => {
+  if (EXPECTED_APPLICATION_ID
+    && applicationId(event) !== EXPECTED_APPLICATION_ID) {
+    // Don't scan, don't POST, and don't say anything useful about why.
+    console.error('Rejected request: unexpected application id');
+    return speak('Sorry, I cannot do that.');
+  }
+
   const reqType = event.request && event.request.type;
   const intentName =
     reqType === 'IntentRequest' && event.request.intent
@@ -189,7 +255,11 @@ exports.handler = async (event) => {
     if (channel) {
       const spoken = String(
         event.request.intent.slots.camera.value || '').trim();
-      const line = pick(CAMERA_ACK_LINES).replace('{camera}', spoken);
+      // Function replacement, not a string: a string replacement treats '$&',
+      // "$'" and '$1' in the *slot value* as backreferences, so a spoken value
+      // containing them came out mangled.
+      const line = pick(CAMERA_ACK_LINES)
+        .replace('{camera}', () => escapeSsml(spoken));
       return speak(line);
     }
     return speak(

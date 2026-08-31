@@ -59,6 +59,48 @@ don't), so we can announce the find-dogs result on exactly that Echo.
   deviceId to its Echo via the `alexa_devices` device registry ids
   (entity_registry `notify.*_speak` device_id fields).
 
+## Hardening the webhook (recommended)
+
+An HA webhook has no authentication of its own — the URL *is* the credential.
+And it is a credential that leaks like a URL: it sits in `index.js`, in
+Alexa's build output, and in your automation. Anyone who gets it can trigger a
+full camera scan at will, which spends vision-API quota and makes your Echos
+talk.
+
+Two optional constants in `index.js` close that off. Both default to empty,
+which keeps the original behaviour, so this is opt-in:
+
+1. **`WEBHOOK_SHARED_SECRET`** — sent as an `X-Dogwatch-Token` header. Generate
+   one (`openssl rand -hex 32`), set it in `index.js`, and add a matching
+   condition to `find_dogs_skill_trigger` so unmatched requests are dropped:
+
+   ```yaml
+   automation:
+     - id: find_dogs_skill_trigger
+       trigger:
+         - platform: webhook
+           webhook_id: dogwatch_find_dogs_skill
+           local_only: false
+           allowed_methods: [POST]
+       condition:
+         - condition: template
+           value_template: >-
+             {{ trigger.headers.get('x-dogwatch-token') == 'PASTE_THE_SAME_SECRET' }}
+       action: ...
+   ```
+
+   Put the secret in `secrets.yaml` and reference it with `!secret` rather than
+   inlining it. Note HA lowercases header names in `trigger.headers`.
+
+2. **`EXPECTED_APPLICATION_ID`** — your skill id from the developer console
+   ("Your Skill ID", `amzn1.ask.skill.…`). The handler rejects any invocation
+   carrying a different one.
+
+   Alexa-hosted skills do **not** need the request-signature verification a
+   self-hosted HTTPS endpoint requires: the Alexa service invokes the Lambda
+   directly, so there is no HTTP request to verify. The application id check is
+   the equivalent control at this layer.
+
 ## HA side (already deployed)
 
 - `automation.find_dogs_skill_trigger` — webhook trigger, `local_only: false`
