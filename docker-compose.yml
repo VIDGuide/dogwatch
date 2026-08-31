@@ -56,6 +56,17 @@ services:
       MQTT_HOST: "172.17.0.1"
       MQTT_PORT: "1883"
       MQTT_TOPIC: "dogwatch"
+      # Optional broker auth/TLS for the notifier + find-dogs listener, the
+      # counterpart to the detector's mqtt_username/mqtt_password/mqtt_tls
+      # config keys. Plaintext and unauthenticated by default, which is fine
+      # for a broker on the docker bridge or a trusted LAN; set these if the
+      # broker is reachable from anywhere else. The find-dogs listener runs a
+      # camera scan on any trigger message, so an exposed broker is a real
+      # remote-trigger surface.
+      # MQTT_USERNAME: ""
+      # MQTT_PASSWORD: ""
+      # MQTT_TLS: "true"
+      # MQTT_TLS_CA_CERT: "/app/mqtt-ca.crt"
       # Vision verification (defaults to Gemini free tier via OpenAI-compat
       # endpoint). Override for a different provider. If the primary fails
       # (e.g. Gemini 429 quota), the check script automatically falls back to
