@@ -201,12 +201,130 @@ def make_cfg(tmp_path, **over):
         "DOGWATCH_WORKSPACE_DIR": str(tmp_path / "ws"),
         "DOGWATCH_NOTIFY_CONFIG": str(tmp_path / "notify.json"),
         "DOGWATCH_SECRETS_FILE": str(tmp_path / "secrets.json"),
+        # Stands in for /tmp — the directory the notifier writes its event
+        # snapshots into, and the only place (besides the workspace dir) that
+        # safe_snapshot_path will accept a path from.
+        "DOGWATCH_SNAPSHOT_ALLOW_DIRS": str(tmp_path / "snaps"),
         "DOGWATCH_VISION_API_KEY": "k",
         "DOGWATCH_BOT_TOKEN": "t",
         "DOGWATCH_CHAT_ID": "c",
     }
     env.update(over)
     return dc.Config(env)
+
+
+def write_snapshot(tmp_path, name="dogwatch_snap_rear-east_1000.jpg"):
+    """Create a snapshot file where the notifier would have written it."""
+    snaps = tmp_path / "snaps"
+    snaps.mkdir(exist_ok=True)
+    p = snaps / name
+    p.write_bytes(b"jpegdata")
+    return p
+
+
+class TestSnapshotPathAllowlist:
+    """The ``snapshot`` field is attacker-reachable and every use of it is an
+    exfiltration primitive (staged copy -> Telegram upload -> vision API), so
+    it must be constrained to paths the notifier could actually have written.
+
+    The event log's default home is /tmp/dogwatch-events.jsonl: a predictable
+    name in a world-writable directory, append-only, and never authenticated.
+    Appending one line naming an arbitrary file was enough to have it mailed
+    out over Telegram.
+    """
+
+    def test_accepts_a_notifier_written_snapshot(self, tmp_path):
+        cfg = make_cfg(tmp_path)
+        snap = write_snapshot(tmp_path)
+        assert dc.safe_snapshot_path(cfg, str(snap)) == os.path.realpath(str(snap))
+
+    def test_accepts_a_fresh_capture_name(self, tmp_path):
+        cfg = make_cfg(tmp_path)
+        snap = write_snapshot(tmp_path, "dogwatch_check_camera_1700000000.jpg")
+        assert dc.safe_snapshot_path(cfg, str(snap))
+
+    def test_accepts_a_staged_workspace_copy(self, tmp_path):
+        cfg = make_cfg(tmp_path)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        p = ws / "dogwatch_1700000000.jpg"
+        p.write_bytes(b"jpegdata")
+        assert dc.safe_snapshot_path(cfg, str(p))
+
+    @pytest.mark.parametrize("path", [
+        "/etc/passwd",
+        "/root/.openclaw/secrets.json",
+        "../../etc/passwd",
+        "",
+    ])
+    def test_rejects_paths_outside_the_allowlist(self, tmp_path, path):
+        cfg = make_cfg(tmp_path)
+        assert dc.safe_snapshot_path(cfg, path) == ""
+
+    def test_rejects_traversal_out_of_an_allowed_dir(self, tmp_path):
+        cfg = make_cfg(tmp_path)
+        (tmp_path / "snaps").mkdir(exist_ok=True)
+        secret = tmp_path / "secrets.json"
+        secret.write_text("{}")
+        # Lands on a real file, and the string even starts with an allowed dir.
+        assert dc.safe_snapshot_path(
+            cfg, str(tmp_path / "snaps" / ".." / "secrets.json")) == ""
+
+    def test_rejects_a_symlink_planted_with_an_allowed_name(self, tmp_path):
+        cfg = make_cfg(tmp_path)
+        snaps = tmp_path / "snaps"
+        snaps.mkdir(exist_ok=True)
+        secret = tmp_path / "secrets.json"
+        secret.write_text("{}")
+        link = snaps / "dogwatch_snap_camera_1700000000.jpg"
+        link.symlink_to(secret)
+        assert dc.safe_snapshot_path(cfg, str(link)) == ""
+
+    def test_rejects_a_non_jpeg_in_an_allowed_dir(self, tmp_path):
+        cfg = make_cfg(tmp_path)
+        p = write_snapshot(tmp_path, "dogwatch_snap_camera_1.json")
+        assert dc.safe_snapshot_path(cfg, str(p)) == ""
+
+    def test_rejects_a_foreign_filename_in_an_allowed_dir(self, tmp_path):
+        cfg = make_cfg(tmp_path)
+        p = write_snapshot(tmp_path, "id_rsa.jpg")
+        assert dc.safe_snapshot_path(cfg, str(p)) == ""
+
+    def test_rejects_a_directory(self, tmp_path):
+        cfg = make_cfg(tmp_path)
+        d = tmp_path / "snaps" / "dogwatch_snap_camera_1.jpg"
+        d.mkdir(parents=True)
+        assert dc.safe_snapshot_path(cfg, str(d)) == ""
+
+    def test_rejects_a_missing_file(self, tmp_path):
+        cfg = make_cfg(tmp_path)
+        (tmp_path / "snaps").mkdir(exist_ok=True)
+        assert dc.safe_snapshot_path(
+            cfg, str(tmp_path / "snaps" / "dogwatch_snap_camera_1.jpg")) == ""
+
+    @pytest.mark.parametrize("bad", [None, 12345, {"path": "/tmp/x.jpg"}])
+    def test_rejects_non_string_values(self, tmp_path, bad):
+        cfg = make_cfg(tmp_path)
+        assert dc.safe_snapshot_path(cfg, bad) == ""
+
+    def test_event_naming_a_secret_yields_no_snapshot(self, tmp_path):
+        """End-to-end: the malicious log line reaches collect_pending and comes
+        out with no snapshot rather than a staged copy of the secret."""
+        cfg = make_cfg(tmp_path)
+        secret = tmp_path / "secrets.json"
+        secret.write_text('{"botToken": "hunter2"}')
+        write_events(cfg.status_file, [ev(1000.0, snapshot=str(secret))])
+        st = dc.CheckState(cfg.state_file).load()
+        pending, _, _ = dc.collect_pending(cfg, st, {}, now=1000.0)
+        assert len(pending) == 1
+        assert pending[0]["snapshot"] == ""
+
+    def test_default_allowlist_is_tmp_plus_workspace(self):
+        cfg = dc.Config({"DOGWATCH_WORKSPACE_DIR": "/var/dogwatch/ws"})
+        # realpath'd, so the comparison in safe_snapshot_path is symlink-stable
+        # (macOS resolves /tmp and /var under /private).
+        assert os.path.realpath("/tmp") in cfg.snapshot_allow_dirs
+        assert os.path.realpath("/var/dogwatch/ws") in cfg.snapshot_allow_dirs
 
 
 class TestCollectPendingDedupe:
@@ -293,8 +411,7 @@ class TestCollectPendingDedupe:
 
     def test_stored_snapshot_is_staged_into_workspace(self, tmp_path):
         cfg = make_cfg(tmp_path)
-        snap = tmp_path / "snap.jpg"
-        snap.write_bytes(b"jpegdata")
+        snap = write_snapshot(tmp_path)
         write_events(cfg.status_file, [ev(1000.0, snapshot=str(snap))])
         st = dc.CheckState(cfg.state_file).load()
         pending, _, _ = dc.collect_pending(cfg, st, {}, now=1000.0)
@@ -305,8 +422,7 @@ class TestCollectPendingDedupe:
 
     def test_repeat_with_snapshot_upgrades_entry_without_moving_anchor(self, tmp_path):
         cfg = make_cfg(tmp_path, DOGWATCH_DEDUPE_WINDOW="90")
-        snap = tmp_path / "snap.jpg"
-        snap.write_bytes(b"jpegdata")
+        snap = write_snapshot(tmp_path)
         write_events(cfg.status_file, [
             ev(1000.0),                              # no snapshot
             ev(1030.0, snapshot=str(snap)),          # real frame arrives
