@@ -430,6 +430,12 @@ class CameraPipeline:
         # always here". A track with centroid movement > 20px between updates
         # is clearly not static.
         for _, track in tracks.items():
+            # Skip tracks the tracker is holding open without a detection this
+            # frame: their history is frozen, so the same historical movement
+            # would be re-reported every frame, silently extending the
+            # suppression grace period for a track nothing is actually seeing.
+            if track.misses:
+                continue
             if len(track.history) >= 2:
                 _, prev_centroid, _ = track.history[-2]
                 _, curr_centroid, _ = track.history[-1]
@@ -480,7 +486,13 @@ class CameraPipeline:
                 label="event_store.log_event",
             )
             if etype == "digging":
-                fn = os.path.join(self.clip_dir, f"dig_{int(t0)}_{tid}.jpg")
+                # Camera name in the filename: clip_dir is per-camera in
+                # principle, but both shipped configs point at "clips", so two
+                # cameras that fired on the same track id in the same second
+                # would otherwise write the same path and one would silently
+                # overwrite the other.
+                fn = os.path.join(self.clip_dir,
+                                  f"dig_{self.name}_{int(t0)}_{tid}.jpg")
                 self.writer.submit(cv2.imwrite, fn, frame, label="clip_imwrite")
                 print(f"[{stamp}] {self.name}: DIGGING  track {tid} score={score:.2f} -> {fn}")
             else:
@@ -520,7 +532,16 @@ class CameraPipeline:
             self.writer.submit(self._prune_clips, t0, label="clip_prune")
 
     def _prune_clips(self, now):
-        """Delete event clips older than clip_retention_days (0 = keep forever)."""
+        """Delete event clips older than clip_retention_days (0 = keep forever).
+
+        Note this prunes the whole of *clip_dir* by mtime, not just this
+        camera's own clips. That is intentional — the directory is treated as
+        owned by its configured camera — but it means two cameras sharing one
+        clip_dir with *different* clip_retention_days values will each apply
+        their own cutoff to the other's files. Give each camera its own
+        clip_dir (as docker-compose.yml's separate mounts assume) if that
+        matters.
+        """
         if self.clip_retention_days <= 0:
             return
         cutoff = now - (self.clip_retention_days * 86400)

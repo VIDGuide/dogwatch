@@ -295,6 +295,109 @@ class TestObserveFrame:
         assert mon.intra_box_motion(steady.copy(), (0, 0, 50, 50)) == 0.0
 
 
+class TestMissedTracksAreSkipped:
+    """Tracks the tracker is holding open without a detection must not fire.
+
+    ``CentroidTracker`` keeps a track alive for ``max_misses`` frames so it
+    survives a brief re-identification gap, and returns it in the live set with
+    the ``bbox`` from the last frame it *was* detected on. ``evaluate`` used to
+    treat those exactly like fresh detections, so a dog leaving the frame kept
+    firing ``dog_at_fence`` on a stale box for several more frames.
+
+    Worse for digging: both halves of the heuristic read as *more* positive the
+    longer a track goes unseen. ``is_stationary`` measures drift over
+    ``history``, which stops being appended to, so drift falls to zero; and
+    ``intra_box_motion`` diffs the current frame against the stale box, which
+    lights up precisely because the dog has moved out of it. Stationary plus
+    busy box is the digging signal.
+    """
+
+    def test_no_event_for_a_track_with_misses(self):
+        mon = BehaviorMonitor(make_cfg(event_cooldown_seconds=0), FRAME_W, FRAME_H)
+        gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        tr = Track(1, (80, 120, 120, 150), t=time.time())
+        tr.misses = 1                      # not matched on this frame
+
+        assert mon.evaluate({1: tr}, gray) == []
+
+    def test_event_fires_again_once_the_track_is_redetected(self):
+        mon = BehaviorMonitor(make_cfg(event_cooldown_seconds=0), FRAME_W, FRAME_H)
+        gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        bbox = (80, 120, 120, 150)
+        tr = Track(1, bbox, t=time.time())
+
+        assert [e[0] for e in mon.evaluate({1: tr}, gray)] == ["dog_at_fence"]
+
+        tr.misses = 2
+        assert mon.evaluate({1: tr}, gray) == []
+
+        tr.update(bbox, t=time.time())     # re-detected: update resets misses
+        assert [e[0] for e in mon.evaluate({1: tr}, gray)] == ["dog_at_fence"]
+
+    def test_only_the_missed_track_is_skipped(self):
+        mon = BehaviorMonitor(make_cfg(event_cooldown_seconds=0), FRAME_W, FRAME_H)
+        gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        seen = Track(1, (80, 120, 120, 150), t=time.time())
+        missed = Track(2, (20, 120, 60, 150), t=time.time())
+        missed.misses = 3
+
+        events = mon.evaluate({1: seen, 2: missed}, gray)
+
+        assert [e[1] for e in events] == [1]
+
+    def test_dig_since_is_preserved_across_a_miss(self):
+        # Skipping must not *reset* an in-progress dig: a real dog that the
+        # model drops for one frame should resume, not start over.
+        mon = BehaviorMonitor(make_cfg(), FRAME_W, FRAME_H)
+        gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        tr = Track(1, (80, 120, 120, 150), t=time.time())
+        tr.dig_since = time.time()
+
+        tr.misses = 1
+        mon.evaluate({1: tr}, gray)
+
+        assert tr.dig_since is not None
+
+    def test_digging_does_not_fire_from_a_stale_box(self):
+        # The composite failure: a stationary-by-omission track whose box lights
+        # up because the dog left it. dig_sustain_seconds=0 makes this fire on
+        # the very next evaluate if the track is not skipped.
+        mon = BehaviorMonitor(
+            make_cfg(dig_sustain_seconds=0.0, motion_energy_thresh=0.5,
+                     stationary_px=1000, dig_stationary_px=1000,
+                     event_cooldown_seconds=0),
+            FRAME_W, FRAME_H,
+        )
+        bbox = (80, 120, 120, 150)
+        t0 = time.time()
+        tr = Track(1, bbox, t=t0)
+        tr.update(bbox, t=t0 + 0.1)
+
+        gray_a = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        gray_b = np.full((FRAME_H, FRAME_W), 255, dtype=np.uint8)
+
+        mon.evaluate({1: tr}, gray_a)      # seed prev_gray while detected
+        tr.misses = 1                      # dog gone from this box
+        events = mon.evaluate({1: tr}, gray_b)
+
+        assert [e[0] for e in events] == []
+
+    def test_baseline_still_advances_when_every_track_is_missed(self):
+        # prev_gray must keep tracking the newest frame even if no track is
+        # evaluated, or intra-box motion would later be measured against a
+        # stale baseline — the bug observe_frame() exists to prevent.
+        mon = BehaviorMonitor(make_cfg(), FRAME_W, FRAME_H)
+        gray_a = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        gray_b = np.full((FRAME_H, FRAME_W), 255, dtype=np.uint8)
+        tr = Track(1, (80, 120, 120, 150), t=time.time())
+        tr.misses = 1
+
+        mon.evaluate({1: tr}, gray_a)
+        mon.evaluate({1: tr}, gray_b)
+
+        assert mon.prev_gray is gray_b
+
+
 class TestCooldownPruning:
     """_last_event is keyed by (event_type, track_id) and track ids increment
     forever, so without pruning every track that ever fired left a permanent
