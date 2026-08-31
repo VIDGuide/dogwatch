@@ -49,6 +49,28 @@ class CameraPipeline:
 
     def __init__(self, cfg, name):
         self.name = name
+        # Pre-bound so close() is callable even if construction fails partway.
+        self.grab = None
+        self.pub = None
+        self.event_store = None
+        self.writer = None
+        try:
+            self._build(cfg, name)
+        except BaseException:
+            # Release whatever was already constructed before re-raising.
+            #
+            # This matters because dogwatch.build_pipelines no longer treats a
+            # failed camera as fatal: the process keeps running with the other
+            # cameras. Without this cleanup, a camera that timed out waiting for
+            # its first frame would leave an orphan FrameGrabber thread behind,
+            # reconnecting to a dead RTSP URL forever with nobody reading from
+            # it. Previously the process exited, so the leak was invisible.
+            self.close()
+            raise
+
+    def _build(self, cfg, name):
+        """Construct everything. Separate from __init__ purely so a failure
+        partway through can be cleaned up — see __init__."""
         self.grab = FrameGrabber(
             cfg["rtsp_url"],
             target_fps=cfg.get("target_fps", 5),
@@ -543,18 +565,31 @@ class CameraPipeline:
         return status
 
     def close(self):
-        """Release this camera's resources. Best-effort; safe to call twice."""
-        try:
-            self.grab.stop()
-        except Exception:
-            pass
-        try:
-            # Drain queued writes so an event fired just before shutdown still
-            # lands on disk / in the DB.
-            self.writer.stop(timeout=5.0)
-        except Exception:
-            pass
-        try:
-            self.event_store.close()
-        except Exception:
-            pass
+        """Release this camera's resources. Best-effort; safe to call twice.
+
+        Also called from ``__init__`` when construction fails partway, so every
+        attribute is checked for None rather than assumed present.
+
+        ``self.pub`` is deliberately NOT disconnected here. Letting the socket
+        drop without a clean MQTT DISCONNECT is what makes the broker publish
+        the Last Will (``availability`` -> ``offline``); calling
+        ``disconnect()`` would suppress the LWT and leave a retained "online"
+        behind while the detector is actually down. See mqtt_publisher.py.
+        """
+        if self.grab is not None:
+            try:
+                self.grab.stop()
+            except Exception:
+                pass
+        if self.writer is not None:
+            try:
+                # Drain queued writes so an event fired just before shutdown
+                # still lands on disk / in the DB.
+                self.writer.stop(timeout=5.0)
+            except Exception:
+                pass
+        if self.event_store is not None:
+            try:
+                self.event_store.close()
+            except Exception:
+                pass

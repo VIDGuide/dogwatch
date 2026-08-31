@@ -90,7 +90,7 @@ effective `score_threshold`, so you can confirm what's actually in force.
 | `event_cooldown_seconds` | Min seconds between repeated events |
 | `off_delay_seconds` | HA `off_delay` for the binary sensors — auto-reverts to OFF this long after the last ON, even if our OFF message is lost (fixes sensors sticking triggered). Default 180 |
 | `min_consecutive` | Consecutive detections required before firing events |
-| `startup_timeout_seconds` | Max seconds to wait for the first camera frame before failing loudly (non-zero exit) instead of hanging forever. Default 60 |
+| `startup_timeout_seconds` | Max seconds to wait for this camera's first frame before giving up on it. Default 60. A camera that times out is **skipped**, not fatal: the other cameras start normally and the detector logs a `DEGRADED` line naming the ones that failed. The process only exits non-zero (letting the restart policy retry) when *no* camera at all could be started. This matches the running-state policy described under "Container health" — one dead camera should not restart a container that is successfully watching others. A skipped camera is not retried until the container restarts. |
 | `frame_stale_seconds` | If the newest decoded frame is older than this, the camera is treated as stale: detection is skipped and the HA entities go **unavailable** rather than sitting silently at OFF. Default 30. This is what makes a dead RTSP reader visible — a frozen frame is otherwise byte-identical to a static scene. Set 0 to disable. |
 | `mqtt_username` / `mqtt_password` | (Optional) MQTT broker credentials. Can also be set via the `MQTT_USERNAME` / `MQTT_PASSWORD` env vars |
 | `mqtt_tls` | (Optional) Enable TLS for the MQTT connection. Default `false` |
@@ -449,7 +449,9 @@ Unit tests cover the parts with real logic, as opposed to I/O glue:
 `tracker.py`, `behavior.py`, `snapshot_quality.py`, `motion_gate.py`,
 `static_suppressor.py`, `event_store.py`, `debug_capture.py`, `detector.py`'s
 tensor bookkeeping and bbox clamping, `frame_grabber.py`'s staleness/backoff
-signalling, `redact.py`, and `pipeline/dogwatch_check.py`'s watermark, read-offset
+signalling, `redact.py`, `dogwatch.py`'s per-camera startup isolation,
+`pipeline/find-dogs.py`'s vision-provider fallback, and
+`pipeline/dogwatch_check.py`'s watermark, read-offset
 and dedupe logic. They run on plain Python — no Coral hardware or camera feed
 needed.
 

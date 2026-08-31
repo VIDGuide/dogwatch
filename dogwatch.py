@@ -54,6 +54,56 @@ def warn_on_shared_key_conflicts(cfgs, names):
                       f"model. (score_threshold, by contrast, IS per-camera.)")
 
 
+def build_pipelines(cfgs, names, factory=None, log=print):
+    """Construct one pipeline per camera, isolating per-camera startup failures.
+
+    Returns ``(pipelines, failures)`` where *failures* is a list of
+    ``(name, exception)`` for the cameras that could not be brought up.
+
+    Why this is not a plain list comprehension: ``CameraPipeline.__init__``
+    raises when a camera produces no frame within ``startup_timeout_seconds``
+    (default 60). That exception used to propagate straight out of ``main()``,
+    so **one** unreachable camera took down detection for **every** camera:
+    the process exited non-zero, ``restart: unless-stopped`` restarted it, it
+    waited out the timeout again and died again. A healthy camera sharing the
+    container never ticked once, and because no heartbeat was ever written the
+    healthcheck reported unhealthy and ``dogwatch-watchdog.sh`` restarted the
+    container too — the two recovery mechanisms reinforced the loop instead of
+    breaking it.
+
+    That was also inconsistent with the policy this project already decided on
+    for the *running* case. ``heartbeat.evaluate`` deliberately keeps the
+    container healthy when a single camera among several goes stale, on the
+    grounds that the others still work, a restart would disrupt them too, and a
+    camera unplugged for a day should not cause a restart loop. Exactly the same
+    reasoning applies at startup, so the same policy is applied here: bring up
+    what can be brought up, and let a dead camera show as ``unavailable`` in
+    Home Assistant rather than taking the fleet with it.
+
+    *factory* defaults to ``CameraPipeline`` and exists so this is testable
+    without a camera or a TPU. It is resolved at call time rather than captured
+    as the parameter's default, so patching the module attribute works too.
+    """
+    factory = CameraPipeline if factory is None else factory
+    pipelines = []
+    failures = []
+    for cfg, name in zip(cfgs, names):
+        try:
+            pipelines.append(factory(cfg, name))
+        except Exception as exc:
+            failures.append((name, exc))
+            # redact(): the message from a startup timeout embeds rtsp_url, and
+            # an unexpected exception type may embed it too. Format the
+            # traceback rather than using traceback.print_exc() so it goes
+            # through redaction as well — see redact.py's module docstring.
+            log(f"[{name}] FAILED TO START: {type(exc).__name__}: "
+                f"{redact(exc)} — continuing without this camera. The other "
+                f"cameras will run normally; this one will not be retried "
+                f"until the container restarts.")
+            log(redact(traceback.format_exc()))
+    return pipelines, failures
+
+
 def main():
     # Config files: either passed as CLI args, or default to config.json plus
     # any config-*.json files alongside it.
@@ -107,14 +157,32 @@ def main():
         extra = " (also the shared inference floor)" if thr == floor else ""
         print(f"[{name}] score_threshold={thr}{extra}")
 
-    # Build a pipeline per camera.
-    pipelines = []
-    for cfg, name in zip(cfgs, names):
-        pipelines.append(CameraPipeline(cfg, name))
+    # Build a pipeline per camera. A camera that cannot produce a frame is
+    # skipped rather than aborting the whole fleet — see build_pipelines.
+    pipelines, failures = build_pipelines(cfgs, names)
+    if not pipelines:
+        # Nothing came up at all, so there is genuinely nothing to do and
+        # exiting non-zero (letting the restart policy retry) is correct. This
+        # is the one case where the old fail-loudly behaviour still applies.
+        raise RuntimeError(
+            "No camera pipelines could be started ("
+            + "; ".join(f"{name}: {redact(exc)}" for name, exc in failures)
+            + ") — check the RTSP URLs/credentials and that the cameras are "
+              "reachable"
+        )
+    if failures:
+        started = ", ".join(p.name for p in pipelines)
+        dead = ", ".join(name for name, _ in failures)
+        print(f"Started {len(pipelines)}/{len(cfgs)} camera(s): {started}. "
+              f"DEGRADED — failed to start: {dead}", flush=True)
 
     # Drive the loop at the SLOWEST camera's target fps (min), so no camera is
-    # sampled faster than it was configured for.
-    target_fps = min(cfg.get("target_fps", 5) for cfg in cfgs)
+    # sampled faster than it was configured for. Computed over the cameras that
+    # actually STARTED, not every config: a camera that failed to come up has no
+    # sampling requirement, and letting its target_fps hold the loop down would
+    # mean an offline slow camera silently throttled a healthy fast one.
+    cfg_by_name = dict(zip(names, cfgs))
+    target_fps = min(cfg_by_name[p.name].get("target_fps", 5) for p in pipelines)
     if target_fps <= 0:
         raise ValueError(
             f"target_fps must be > 0 (got {target_fps}); "
