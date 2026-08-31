@@ -113,6 +113,9 @@ effective `score_threshold`, so you can confirm what's actually in force.
 | `static_suppression_protected_events` | (Optional) Event types that are **never** suppressed. Default `["digging"]`. Digging is the event the siren depends on, and the cost of dropping a real one (dogs get out) is far worse than the cost of letting a false one through to vision verification. A protected event also *clears* an existing suppression for that region — a fence beam doesn't dig. |
 | `static_suppression_movement_grace_seconds` | (Optional) After the tracker sees real movement into a region, withhold suppression for this long. Defaults to `static_suppression_decay_seconds`. This is what stops a dog that walks in and then holds still from being reclassified as a beam. |
 | `write_queue_size` | (Optional) Depth of the per-camera background write queue (event-clip JPEG encodes, debug captures, SQLite inserts). Default 256. These writes are off the detection thread; if the queue overflows the write is dropped and logged rather than stalling detection. |
+| `event_store_retention_days` | (Optional) Delete SQLite events older than this. `0` (default) keeps everything forever. Swept hourly. |
+| `event_store_busy_timeout_ms` | (Optional) How long a write waits for a locked database before failing. Default 5000. A concurrent reader (`export-daily-events.py`, the `sqlite3` CLI) could otherwise surface "database is locked" on the detection path. |
+| `clip_retention_days` | (Optional) Delete event clips in `clip_dir` older than this. `0` (default) keeps everything forever, matching the historical "clips are a permanent record" behaviour — but a full disk makes `imwrite` fail, so being able to cap it matters. Swept hourly. |
 | `gpu_decode` | (Optional) Offload RTSP frame decode to GPU via NVDEC. Default `false`. Requires `Dockerfile.gpu` / `docker-compose.gpu.yml` and an NVIDIA GPU. See "Performance tuning → GPU-accelerated decode" above. |
 
 **MQTT security note:** by default the broker connection is plaintext and
@@ -143,6 +146,91 @@ project is deliberate about where those strings can end up:
 - **The notifier's config and `secrets.json` remain the only homes for
   credentials**, both gitignored / outside the repo. Lock the latter down with
   `chmod 600 ~/.openclaw/secrets.json`.
+
+### Container health
+
+`restart: unless-stopped` only recovers a process that *exits*. It cannot see
+this system's actual failure mode: the process stays alive and goes blind (a
+wedged frame grabber, a publisher that never connected, a loop overrunning its
+interval). None of those change the exit code.
+
+So `dogwatch.py` writes a heartbeat — the loop's last tick time plus each
+camera's frame age, write-queue depth and suppression counters — and
+`healthcheck.py` turns it into a container health status:
+
+```bash
+docker exec dogwatch python /app/healthcheck.py
+# ok: 2 camera(s) healthy
+# ok: degraded: 1/2 camera(s) stale (camera), others healthy
+# UNHEALTHY: all 1 camera(s) stale: rear-east — no usable frames
+# UNHEALTHY: main loop has not ticked for 600s (limit 60s) — detector is wedged
+
+docker exec dogwatch python /app/healthcheck.py --json   # for scripting
+```
+
+A *single* stale camera among several is reported as degraded but stays
+**healthy** on purpose: the other cameras still work, a restart would disrupt
+them too, that camera is already `unavailable` in Home Assistant, and a camera
+unplugged for a day shouldn't cause a restart loop.
+
+**Plain Docker does not restart unhealthy containers** (only Swarm does), so the
+`HEALTHCHECK` gives you visibility — `docker ps` shows `unhealthy` — and
+`pipeline/dogwatch-watchdog.sh` is what acts on it. The watchdog previously only
+detected stopped or "zombie" containers; it now also restarts on `unhealthy`,
+rate-limited to once per `DOGWATCH_HEALTH_RESTART_MIN_INTERVAL` (default 900s) so
+a genuinely offline camera can't cause a restart loop.
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `DOGWATCH_HEARTBEAT_FILE` | `/tmp/dogwatch-heartbeat.json` | Heartbeat location |
+| `DOGWATCH_HEARTBEAT_INTERVAL` | `5` | Seconds between heartbeat writes |
+| `DOGWATCH_HEALTH_RESTART_MIN_INTERVAL` | `900` | Watchdog: min seconds between health-triggered restarts |
+
+### Disk growth
+
+Three stores used to grow without any bound. All are now cappable, and all
+default to the previous keep-forever behaviour so nothing is deleted unless you
+opt in:
+
+| Store | Key | Default |
+|-------|-----|---------|
+| SQLite `events` table | `event_store_retention_days` | 0 (forever) |
+| Event clips (`clip_dir`) | `clip_retention_days` | 0 (forever) |
+| Debug captures | `debug_capture_retention_days` | 0 (forever) |
+| Notifier event log | `DOGWATCH_STATUS_MAX_BYTES` env | 5 MB, then rotated to `.1` |
+
+The first three are swept hourly on the background writer thread. The event log
+rotates in place; `dogwatch_check.py` detects a file that has shrunk and re-reads
+from the start, and its timestamp watermark stops anything being alerted twice.
+
+### Container hardening
+
+Applied:
+
+- **The third-party `libedgetpu` `.deb` is digest-pinned.** It's fetched over the
+  network and installed with `dpkg` as root — the most privileged step in the
+  build — and was previously unverified, so a swapped release asset would have
+  been installed silently. `Dockerfile.gpu` also no longer swallows install
+  failure with `|| true`, which used to produce an image that built fine and then
+  failed at inference.
+- **`no-new-privileges`** on all compose services.
+- **`gcc` removed** from the runtime image (every dependency ships a wheel;
+  verified by building).
+- **`.dockerignore`** added at both build-context roots. The context previously
+  included `models/`, `clips/`, `data/events.db`, `debug_captures/` and all of
+  `.git` — none of which is COPYed into either image — plus, for the notifier,
+  the credential-bearing `dogwatch-notify.config.json`.
+
+Not applied, deliberately:
+
+- **Non-root `USER`.** Both `/dev/apex_0` and the bind-mounted
+  `clips/`/`data/`/`debug_captures/` directories are root-owned on an existing
+  deployment. Switching the `USER` without also adding a udev rule (or
+  `--group-add`) for the apex device *and* chowning those volumes would break a
+  running install on the next `docker compose up`. It's a migration, not a config
+  tweak, so it's documented rather than silently changed.
+- **`cap_drop: [ALL]`** — plausibly fine, but not verifiable without the Coral
+  hardware, so untested.
 
 ### Availability / staleness
 

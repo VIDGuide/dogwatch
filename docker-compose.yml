@@ -4,6 +4,14 @@ services:
     container_name: dogwatch
     restart: unless-stopped
 
+    # Cheap, non-breaking hardening: stop any process in the container from
+    # gaining privileges via setuid binaries. The container still runs as root
+    # (see the Dockerfile comment — /dev/apex_0 ownership and the root-owned
+    # bind mounts below make an unprivileged switch a deployment-breaking
+    # change rather than a config tweak).
+    security_opt:
+      - no-new-privileges:true
+
     # M.2 / PCIe Coral — apex driver loaded on host
     devices:
       - /dev/apex_0:/dev/apex_0
@@ -37,8 +45,14 @@ services:
     container_name: dogwatch-notify
     restart: unless-stopped
 
+    security_opt:
+      - no-new-privileges:true
+
     environment:
       TZ: "Australia/Sydney"
+      # Rotate the event log once it reaches this size (one previous generation
+      # is kept as .1). It was previously append-only and never rotated.
+      # DOGWATCH_STATUS_MAX_BYTES: "5000000"
       MQTT_HOST: "172.17.0.1"
       MQTT_PORT: "1883"
       MQTT_TOPIC: "dogwatch"

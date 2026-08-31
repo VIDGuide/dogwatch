@@ -1,0 +1,16 @@
+# Build context for the notifier image (docker-compose builds ./pipeline).
+#
+# A .dockerignore applies to the root of its own build context, so the repo-root
+# one does not cover this directory — hence a second file.
+#
+# Most importantly: dogwatch-notify.config.json holds RTSP/NVR credentials and
+# the Telegram chat id. It is gitignored, but it lives right here on the
+# deployment host and would otherwise be uploaded into the build context on
+# every build. The real config is bind-mounted at runtime; only the .example is
+# ever needed at build time (and even that isn't COPYed).
+dogwatch-notify.config.json
+*.state
+__pycache__/
+*.pyc
+*.pyo
+*.md

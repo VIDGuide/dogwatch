@@ -17,13 +17,28 @@ FROM python:3.12-slim-bookworm
 ADD https://github.com/feranick/libedgetpu/releases/download/16.0TF2.19.1-1/libedgetpu1-std_16.0tf2.19.1-1.bookworm_amd64.deb \
     /tmp/libedgetpu.deb
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Verify the download before installing it as root.
+#
+# This is a third-party community .deb fetched over the network and installed
+# with dpkg as uid 0 — the most privileged thing in the whole build. It was
+# previously unverified, so a compromised or swapped release asset would have
+# been installed silently. Pinned by digest instead.
+#
+# Deliberately `sha256sum -c` in a RUN rather than `ADD --checksum=`: the latter
+# needs a recent BuildKit, while this works with any builder and puts the
+# verification in the build log.
+#
+# To bump the version, change the URL above and replace the digest with the
+# output of:
+#   curl -fsSL <url> | sha256sum
+RUN echo "23be53c72eff4d44afc2f727700da185791d3ca0867bd0b5e082ec3a0de21925  /tmp/libedgetpu.deb" \
+      | sha256sum -c - \
+    && apt-get update && apt-get install -y --no-install-recommends \
     udev \
     usbutils \
     libgl1 \
     libglib2.0-0 \
     ffmpeg \
-    gcc \
     && rm -rf /var/lib/apt/lists/* \
     && dpkg -i /tmp/libedgetpu.deb \
     && rm /tmp/libedgetpu.deb
@@ -43,4 +58,25 @@ RUN pip install --no-cache-dir \
 COPY *.py /app/
 WORKDIR /app
 
+# Report whether the detector is actually still watching, not merely running.
+#
+# The process can be alive and completely blind: a wedged/dead frame grabber
+# keeps returning the same stale frame, and before frame timestamps existed that
+# was indistinguishable from a static scene. dogwatch.py now writes a heartbeat
+# containing the loop timestamp and each camera's frame age; healthcheck.py
+# fails when the loop has stopped or every camera has gone stale.
+#
+# NOTE: plain Docker does not restart unhealthy containers (only Swarm does), so
+# this provides visibility (`docker ps` shows "unhealthy") and a signal for
+# pipeline/dogwatch-watchdog.sh, which acts on it.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=90s --retries=3 \
+    CMD ["python", "/app/healthcheck.py"]
+
+# Runs as root because /dev/apex_0 is typically root-owned and the bind-mounted
+# clips/data/debug_captures directories are root-owned on existing deployments.
+# To run unprivileged you would need to (a) grant the runtime user access to the
+# apex device (udev rule / --group-add) and (b) chown the mounted volumes —
+# switching the USER here without both would break an existing install, so it is
+# left as a deliberate, documented choice rather than a silent one. See the
+# "Container hardening" section of the README.
 CMD ["python", "-u", "dogwatch.py"]

@@ -13,11 +13,14 @@ every event without measurable overhead.
 Config keys (per-camera or global, all optional):
     "event_store_enabled": true,          # default true
     "event_store_path": "data/events.db",      # path to SQLite file
+    "event_store_retention_days": 0,      # 0 = keep forever
+    "event_store_busy_timeout_ms": 5000,  # wait rather than raise on a locked db
 """
 import json
 import os
 import sqlite3
 import threading
+import time
 
 
 class EventStore:
@@ -44,15 +47,27 @@ class EventStore:
         self.enabled = cfg.get("event_store_enabled", True)
         self.camera_name = camera_name
         self._db_path = cfg.get("event_store_path", "data/events.db")
+        self.retention_days = float(cfg.get("event_store_retention_days", 0) or 0)
+        self._busy_timeout_ms = int(cfg.get("event_store_busy_timeout_ms", 5000))
         self._lock = threading.Lock()
         self._conn = None
+        self._last_prune = 0.0
 
         if self.enabled:
             os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
-            self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+            # timeout= is the Python-level equivalent of busy_timeout and applies
+            # to lock acquisition. Without it, ANY concurrent writer — a second
+            # camera's EventStore, export-daily-events.py, or a human running the
+            # sqlite3 CLI — could raise "database is locked" straight out of the
+            # detection path. WAL makes readers non-blocking, but writers still
+            # serialise.
+            self._conn = sqlite3.connect(
+                self._db_path, check_same_thread=False,
+                timeout=self._busy_timeout_ms / 1000.0)
             self._conn.executescript(self.SCHEMA)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
 
     def log_event(self, event_type, track_id, score, bbox, frame_w, frame_h,
                   ts, metadata=None):
@@ -108,6 +123,46 @@ class EventStore:
             cur = self._conn.execute(sql, params)
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def prune(self, now=None):
+        """Delete events older than ``event_store_retention_days``.
+
+        Returns the number of rows removed. A retention of 0 (the default) keeps
+        everything forever, matching debug_capture's convention — but the table
+        previously had *no* pruning available at all, so an append-only row per
+        event grew without bound for the life of the deployment.
+
+        VACUUM is deliberately not run: it rewrites the whole database and takes
+        an exclusive lock. Freed pages are reused by subsequent inserts, so the
+        file stops growing without needing it.
+        """
+        if not self.enabled or self._conn is None or self.retention_days <= 0:
+            return 0
+        now = time.time() if now is None else now
+        cutoff = now - (self.retention_days * 86400)
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
+            removed = cur.rowcount or 0
+            self._conn.commit()
+        if removed:
+            print(f"[{self.camera_name}] event_store: pruned {removed} event(s) "
+                  f"older than {self.retention_days:g} day(s)")
+        return removed
+
+    def maybe_prune(self, now=None, interval=3600.0):
+        """Prune at most once per *interval*. Safe to call frequently."""
+        now = time.time() if now is None else now
+        if now - self._last_prune < interval:
+            return 0
+        self._last_prune = now
+        return self.prune(now)
+
+    def count(self):
+        """Total rows — used by tests and diagnostics."""
+        if not self.enabled or self._conn is None:
+            return 0
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
 
     def close(self):
         if self._conn:

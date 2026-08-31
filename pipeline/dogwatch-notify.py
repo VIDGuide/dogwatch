@@ -24,6 +24,39 @@ from dw_redact import redact
 from image_quality import validate_image_file
 
 STATUS_FILE = "/tmp/dogwatch-events.jsonl"
+
+# ---- Event log appends (serialised + size-bounded) ----
+# The log is append-only and was never rotated, so it grew for the life of the
+# container. Appends also came from several threads (the MQTT callback and every
+# _handle_on_event worker) with no synchronisation.
+#
+# Rotation is safe with respect to dogwatch_check.py's byte-offset resume: it
+# detects a file that has shrunk and re-reads from the start, and its timestamp
+# watermark stops anything being alerted twice.
+STATUS_MAX_BYTES = int(os.environ.get("DOGWATCH_STATUS_MAX_BYTES", 5_000_000))
+_status_lock = threading.Lock()
+
+
+def append_event(entry: dict) -> None:
+    """Append one event to the status file, rotating it if it has grown large."""
+    line = json.dumps(entry) + "\n"
+    with _status_lock:
+        try:
+            if (STATUS_MAX_BYTES > 0
+                    and os.path.exists(STATUS_FILE)
+                    and os.path.getsize(STATUS_FILE) >= STATUS_MAX_BYTES):
+                # Keep exactly one previous generation for post-hoc debugging.
+                os.replace(STATUS_FILE, STATUS_FILE + ".1")
+                print(f"  Rotated {STATUS_FILE} (>= {STATUS_MAX_BYTES} bytes)")
+        except OSError as exc:
+            print(f"  Could not rotate {STATUS_FILE}: {exc}")
+        try:
+            with open(STATUS_FILE, "a") as f:
+                f.write(line)
+        except OSError as exc:
+            # The check script reads this file; losing a line means losing an
+            # event, so make it loud rather than silent.
+            print(f"  FAILED to record event to {STATUS_FILE}: {exc}")
 MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 BASE_TOPIC = os.environ.get("MQTT_TOPIC", "dogwatch")
@@ -699,8 +732,7 @@ def _handle_on_event(client, camera, slug, bbox, attr, entry, now):
     # wrote after the photo send, an event landing just as a check reads the
     # file could age past the cutoff before the next cycle — exactly how the
     # 13:55:27 digging event (79%) got skipped on 2026-08-17.
-    with open(STATUS_FILE, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    append_event(entry)
 
     if snap_path:
         score = attr.get("score", 0.0) if attr else 0.0
@@ -852,8 +884,7 @@ def on_message(client, userdata, msg):
 
     # Write event to status file for the cron-based backup pipeline
     if not deferred:
-        with open(STATUS_FILE, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+        append_event(entry)
 
 
 def main():

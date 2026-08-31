@@ -23,6 +23,9 @@ services:
     container_name: dogwatch
     restart: unless-stopped
 
+    security_opt:
+      - no-new-privileges:true
+
     # Coral Edge TPU (PCIe M.2)
     devices:
       - /dev/apex_0:/dev/apex_0
