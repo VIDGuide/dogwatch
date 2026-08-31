@@ -17,13 +17,40 @@ import time
 import traceback
 
 from camera_pipeline import CameraPipeline
-from detector import DogDetector
+from detector import DogDetector, resolve_score_threshold
 from redact import redact
 
 
 def load_config(path):
     with open(path) as f:
         return json.load(f)
+
+
+def camera_name_for(config_path):
+    """Derive a camera name from its config filename.
+
+    ``config-rear-east.json`` -> ``rear-east``; ``config.json`` -> ``camera``.
+    """
+    name = os.path.splitext(os.path.basename(config_path))[0]
+    return name.replace("config-", "").replace("config", "camera")
+
+
+def warn_on_shared_key_conflicts(cfgs, names):
+    """Warn when configs disagree on a key that can only have one value.
+
+    The Edge TPU delegate can only be held by one process, so there is a single
+    interpreter built from the first config. Any other config's ``model_path``
+    or ``labels_path`` is therefore ignored — previously in complete silence.
+    """
+    for key in ("model_path", "labels_path"):
+        first = cfgs[0].get(key)
+        for cfg, name in zip(cfgs[1:], names[1:]):
+            value = cfg.get(key)
+            if value is not None and value != first:
+                print(f"[{name}] WARNING: {key}={value!r} is IGNORED — only one "
+                      f"Edge TPU interpreter exists, built from "
+                      f"{names[0]}'s {key}={first!r}. All cameras share one "
+                      f"model. (score_threshold, by contrast, IS per-camera.)")
 
 
 def main():
@@ -41,19 +68,47 @@ def main():
         config_paths.extend(extras)
 
     cfgs = [load_config(p) for p in config_paths]
+    if not cfgs:
+        raise ValueError("No camera configs found — expected config.json and/or "
+                         "config-<name>.json in the working directory")
     print(f"Loaded {len(cfgs)} camera config(s): {', '.join(config_paths)}")
 
-    # Shared model / Coral interpreter (only one can bind the TPU).
+    names = [camera_name_for(p) for p in config_paths]
+
+    # Warn about keys that genuinely CANNOT be per-camera. Only one process can
+    # bind the TPU, so there is exactly one interpreter and therefore one model.
+    # Silently ignoring a second camera's model_path is the kind of thing that
+    # wastes an afternoon, so say so out loud.
+    warn_on_shared_key_conflicts(cfgs, names)
+
+    # Per-camera detection thresholds.
+    #
+    # score_threshold, unlike model_path, does NOT have to be shared: it's a
+    # pure post-inference filter over the output tensors. It used to be shared
+    # by accident — the detector was built from cfgs[0] alone, so every camera
+    # after the first ran on camera #1's threshold. That made the README's
+    # advice to raise score_threshold per camera (to suppress that camera's
+    # false positives) a no-op on every camera but the first, and silently
+    # ignored the 0.55 in config-rear-east.example.json.
+    #
+    # The shared detector is built at the LOWEST configured threshold, so no
+    # camera is starved of detections it should have seen, and each pipeline
+    # then applies its own threshold to the results.
+    thresholds = [resolve_score_threshold(cfg, name)
+                  for cfg, name in zip(cfgs, names)]
+    floor = min(thresholds)
+
     shared = DogDetector(
         cfgs[0]["model_path"], cfgs[0]["labels_path"],
-        cfgs[0]["score_threshold"],
+        score_threshold=floor,
     )
+    for name, thr in zip(names, thresholds):
+        extra = " (also the shared inference floor)" if thr == floor else ""
+        print(f"[{name}] score_threshold={thr}{extra}")
 
     # Build a pipeline per camera.
     pipelines = []
-    for i, cfg in enumerate(cfgs):
-        name = os.path.splitext(os.path.basename(config_paths[i]))[0]
-        name = name.replace("config-", "").replace("config", "camera")
+    for cfg, name in zip(cfgs, names):
         pipelines.append(CameraPipeline(cfg, name))
 
     # Drive the loop at the SLOWEST camera's target fps (min), so no camera is

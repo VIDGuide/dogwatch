@@ -35,6 +35,7 @@ from debug_capture import DebugCapture
 from event_store import EventStore
 from frame_grabber import FrameGrabber
 from motion_gate import MotionGate
+from detector import resolve_score_threshold
 from mqtt_publisher import Publisher
 from redact import redact
 from snapshot_quality import is_image_bad
@@ -53,6 +54,13 @@ class CameraPipeline:
             gpu_decode=cfg.get("gpu_decode", False),
             name=name,
         )
+
+        # This camera's own detection confidence threshold. Applied per call in
+        # tick() rather than baked into the shared DogDetector, because one
+        # interpreter serves every camera but the confidence filter is a pure
+        # post-inference step. dogwatch.main validates the configured value and
+        # builds the shared detector at the lowest threshold in the fleet.
+        self.score_threshold = resolve_score_threshold(cfg, name)
 
         # A frame older than this means the reader is wedged/dead rather than
         # the scene being static — the two are otherwise indistinguishable.
@@ -367,7 +375,10 @@ class CameraPipeline:
             self.monitor.observe_frame(gray)
             return
 
-        dets = detector.detect(roi)
+        # Pass THIS camera's threshold, not the shared detector's. The shared
+        # interpreter is built at the lowest threshold across all cameras (see
+        # dogwatch.main), so a stricter camera must filter its own results.
+        dets = detector.detect(roi, score_threshold=self.score_threshold)
         tracks = self.tracker.update(
             [d["bbox"] for d in dets], t0, scores=[d["score"] for d in dets]
         )

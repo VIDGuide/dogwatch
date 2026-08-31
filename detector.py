@@ -154,11 +154,52 @@ def _clamp_bbox(bbox, width, height):
     return (x0, y0, x1, y1)
 
 
+#: Matches the README's documented default and DogDetector's own default, so
+#: a config that omits score_threshold behaves as documented instead of raising.
+DEFAULT_SCORE_THRESHOLD = 0.4
+
+
+def resolve_score_threshold(cfg, name="camera"):
+    """Return a camera config's detection threshold, validated.
+
+    Lives here rather than in dogwatch.py so CameraPipeline can share it
+    without a circular import (dogwatch imports camera_pipeline).
+
+    A threshold outside (0, 1] breaks detection in a way that looks exactly
+    like "the model never sees my dog": ``score_threshold: 55`` (meaning 55%)
+    suppresses every detection forever, silently. Warn and fall back to the
+    documented default rather than run in that state.
+    """
+    raw = cfg.get("score_threshold", DEFAULT_SCORE_THRESHOLD)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        print(f"[{name}] WARNING: score_threshold={raw!r} is not a number — "
+              f"using default {DEFAULT_SCORE_THRESHOLD}")
+        return DEFAULT_SCORE_THRESHOLD
+    if not 0.0 < value <= 1.0:
+        print(f"[{name}] WARNING: score_threshold={value} is outside (0, 1] — "
+              f"confidences are fractions, not percentages. Using default "
+              f"{DEFAULT_SCORE_THRESHOLD}")
+        return DEFAULT_SCORE_THRESHOLD
+    return value
+
+
 class DogDetector:
-    def __init__(self, model_path, labels_path, score_threshold=0.4,
+    """Shared Edge TPU interpreter, filtered to the 'dog' class.
+
+    Only one process can bind the TPU, so a multi-camera deployment shares one
+    instance of this class. Note that ``score_threshold`` is a **pure
+    post-inference filter** on the output tensors — it costs nothing to vary per
+    call, and ``detect()`` accepts an override for exactly that reason. See
+    ``detect()`` for why that matters.
+    """
+
+    def __init__(self, model_path, labels_path, score_threshold=DEFAULT_SCORE_THRESHOLD,
                  target_label="dog"):
         self.interp = _make_interpreter(model_path)
         self.interp.allocate_tensors()
+        # Acts as the default/floor; callers may pass a stricter value per call.
         self.score_threshold = score_threshold
         self.labels = self._load_labels(labels_path)
         # COCO label files vary ("dog" may be id 17 or 18) — resolve by name.
@@ -177,17 +218,30 @@ class DogDetector:
                     labels[idx] = name
         return labels
 
-    def detect(self, frame):
+    def detect(self, frame, score_threshold=None):
         """Return [{'bbox': (x0,y0,x1,y1) in pixels, 'score': float}, ...].
+
+        *score_threshold* overrides the instance default for this call. This
+        exists so a **shared** detector can still honour **per-camera**
+        thresholds: one process binds the TPU, so all cameras share this
+        interpreter, but confidence filtering happens in pure Python over the
+        output tensors and therefore does not have to be shared.
+
+        Without this, ``dogwatch.py`` built the shared detector from the first
+        config alone and every subsequent camera silently ran on camera #1's
+        threshold — while the README documented ``score_threshold`` as
+        per-camera and specifically advised raising it per camera to suppress
+        false positives.
 
         Boxes are clamped to the frame; see _clamp_bbox for why that matters.
         """
+        threshold = self.score_threshold if score_threshold is None else score_threshold
         h, w = frame.shape[:2]
         scale = _set_resized_input(
             self.interp, (w, h), lambda size: cv2.resize(frame, size))
         self.interp.invoke()
         out = []
-        for obj in _get_objects(self.interp, self.score_threshold, scale):
+        for obj in _get_objects(self.interp, threshold, scale):
             if obj["id"] not in self.target_ids:
                 continue
             bbox = _clamp_bbox(obj["bbox"], w, h)
