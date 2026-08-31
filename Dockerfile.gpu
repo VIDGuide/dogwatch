@@ -48,8 +48,17 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 # libedgetpu runtime (same community build as the CPU Dockerfile)
 ADD https://github.com/feranick/libedgetpu/releases/download/16.0TF2.19.1-1/libedgetpu1-std_16.0tf2.19.1-1.bookworm_amd64.deb \
     /tmp/libedgetpu.deb
-RUN dpkg -i /tmp/libedgetpu.deb || true \
-    && apt-get update && apt-get install -f -y \
+# Digest-pinned (see the CPU Dockerfile for the rationale and the bump recipe).
+#
+# Also note: `dpkg -i ... || true` used to swallow install failure entirely, so a
+# broken libedgetpu produced an image that built cleanly and then failed at
+# inference time. dpkg is now allowed to fail the build; the `apt-get install -f`
+# that follows still resolves the dependencies dpkg reports as missing, which is
+# the legitimate reason the `|| true` was there.
+RUN echo "23be53c72eff4d44afc2f727700da185791d3ca0867bd0b5e082ec3a0de21925  /tmp/libedgetpu.deb" \
+      | sha256sum -c - \
+    && (dpkg -i /tmp/libedgetpu.deb || apt-get update && apt-get install -f -y) \
+    && dpkg -s libedgetpu1-std >/dev/null \
     && rm -rf /var/lib/apt/lists/* /tmp/libedgetpu.deb
 
 # Python dependencies.
@@ -64,5 +73,10 @@ RUN pip install --no-cache-dir \
 
 COPY *.py /app/
 WORKDIR /app
+
+# See the CPU Dockerfile for what this checks and why plain Docker won't act on
+# it by itself.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=90s --retries=3 \
+    CMD ["python", "/app/healthcheck.py"]
 
 CMD ["python", "-u", "dogwatch.py"]

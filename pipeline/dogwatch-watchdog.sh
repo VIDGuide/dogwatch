@@ -30,20 +30,54 @@ trim_log() {
   fi
 }
 
-# container_state <name> -> running | zombie | <status> | missing
+HEALTH_STATE_DIR="${DOGWATCH_WATCHDOG_STATE_DIR:-/tmp}"
+# Don't let a health-triggered restart become a restart loop. A camera that is
+# genuinely unplugged will report unhealthy indefinitely, and hammering the
+# container every 2 minutes would help nobody.
+HEALTH_RESTART_MIN_INTERVAL="${DOGWATCH_HEALTH_RESTART_MIN_INTERVAL:-900}"
+
+# container_state <name> -> running | zombie | unhealthy | <status> | missing
 container_state() {
-  local name=$1 status
+  local name=$1 status health
   status=$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null)
   if [ "$status" != "running" ]; then
     [ -z "$status" ] && echo missing || echo "$status"
     return
   fi
   # Metadata says running — verify a real process exists behind it.
-  if docker top "$name" >/dev/null 2>&1; then
-    echo running
-  else
+  if ! docker top "$name" >/dev/null 2>&1; then
     echo zombie
+    return
   fi
+  # Running with a real process, but is it doing anything?
+  #
+  # This is the blind spot this script had: it could only see a container that
+  # had stopped or lost its task. It could not see the detector's actual failure
+  # mode — process alive, frame grabber wedged, nothing being watched. The
+  # container now reports that via HEALTHCHECK (see healthcheck.py), so consume
+  # it. Containers without a healthcheck report an empty string and are treated
+  # as running, exactly as before.
+  health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+    "$name" 2>/dev/null)
+  if [ "$health" = "unhealthy" ]; then
+    echo unhealthy
+    return
+  fi
+  echo running
+}
+
+# health_restart_allowed <name> -> 0 if enough time has passed since the last
+# health-triggered restart of this container.
+health_restart_allowed() {
+  local name=$1 stamp last now
+  stamp="$HEALTH_STATE_DIR/dogwatch-watchdog-health-$name.stamp"
+  now=$(date +%s)
+  last=$(cat "$stamp" 2>/dev/null | tr -dc '0-9')
+  if [ -n "$last" ] && [ $((now - last)) -lt "$HEALTH_RESTART_MIN_INTERVAL" ]; then
+    return 1
+  fi
+  echo "$now" > "$stamp" 2>/dev/null
+  return 0
 }
 
 # ensure_container <name> <compose_service_or_empty>
@@ -52,6 +86,20 @@ ensure_container() {
   st=$(container_state "$name")
   case "$st" in
     running) return 0 ;;
+    unhealthy)
+      # Docker itself does not restart unhealthy containers (only Swarm does),
+      # so this is the piece that closes the loop.
+      if health_restart_allowed "$name"; then
+        log "FIX: $name reports unhealthy — restarting"
+        docker inspect -f '{{range .State.Health.Log}}{{.Output}}{{end}}' "$name" \
+          2>/dev/null | tail -n 3 >> "$LOG"
+        docker restart "$name" >/dev/null 2>&1 \
+          && log "OK: $name restarted (unhealthy)" \
+          || log "ERR: $name restart failed (unhealthy)"
+      else
+        log "SKIP: $name unhealthy but restarted within the last ${HEALTH_RESTART_MIN_INTERVAL}s"
+      fi
+      ;;
     zombie)
       if [ -n "$compose_svc" ]; then
         log "FIX: $name zombie (no task) — recreating via compose"

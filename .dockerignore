@@ -1,0 +1,54 @@
+# Keep the build context small.
+#
+# Without this, `docker compose build` uploads the entire working directory to
+# the daemon on every build — including models/ (~tens of MB of .tflite),
+# clips/ and clips-rear-east/ (one full-res JPEG per digging event, unbounded),
+# debug_captures/, data/events.db and the whole .git history. None of it is
+# COPYed into either image: the Dockerfiles only take *.py, and models/ and the
+# clip/data directories are bind-mounted at runtime by docker-compose.
+#
+# Mirrors .gitignore's runtime-artifact entries, with the build-only additions
+# (.git, tests, docs) that .gitignore obviously cannot have.
+
+# Version control and CI
+.git
+.gitignore
+.github
+
+# Runtime artefacts — bind-mounted at runtime, never baked into an image
+models/
+clips/
+clips-rear-east/
+debug_captures/
+data/
+notify_workspace/
+*.db
+
+# Local config and secrets (mounted read-only at runtime)
+config.json
+config-*.json
+!config-*.example.json
+dogwatch-notify.config.json
+pipeline/dogwatch-notify.config.json
+.ssh
+.vision_verify_state.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Tests, samples and docs are not needed in either image.
+# NOTE: tests/hardware_smoke_test.py is run on the deployment host by
+# bind-mounting it into the container (see the README), not from the image, so
+# excluding tests/ here does not break it.
+tests/
+samples/
+*.md
+LICENSE
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

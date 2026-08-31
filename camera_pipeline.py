@@ -166,6 +166,13 @@ class CameraPipeline:
         self.clip_dir = cfg.get("clip_dir", "clips")
         self.cooldown = cfg.get("event_cooldown_seconds", 30)
         os.makedirs(self.clip_dir, exist_ok=True)
+        # Clip retention. 0 (default) keeps everything forever, which is the
+        # historical behaviour — clips were explicitly "a permanent record" — but
+        # there was previously no way to bound them at all, so one full-res JPEG
+        # per digging event accumulated indefinitely. A full disk makes imwrite
+        # fail, which is a detection-path failure, so being able to cap this
+        # matters.
+        self.clip_retention_days = float(cfg.get("clip_retention_days", 0) or 0)
 
         # Optional rolling archive of low-res (post-crop, model input) +
         # high-res (raw frame) snapshots per event, for offline diagnosis.
@@ -485,6 +492,55 @@ class CameraPipeline:
             self._last_debug_cleanup = t0
             self.writer.submit(self.debug_capture.cleanup,
                                label="debug_capture.cleanup")
+            # Same hourly slot for the other two unbounded stores.
+            self.writer.submit(self.event_store.maybe_prune, t0,
+                               label="event_store.prune")
+            self.writer.submit(self._prune_clips, t0, label="clip_prune")
+
+    def _prune_clips(self, now):
+        """Delete event clips older than clip_retention_days (0 = keep forever)."""
+        if self.clip_retention_days <= 0:
+            return
+        cutoff = now - (self.clip_retention_days * 86400)
+        removed = 0
+        try:
+            for fname in os.listdir(self.clip_dir):
+                path = os.path.join(self.clip_dir, fname)
+                try:
+                    if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                        os.remove(path)
+                        removed += 1
+                except OSError:
+                    continue
+        except FileNotFoundError:
+            return
+        if removed:
+            print(f"[{self.name}] pruned {removed} clip(s) older than "
+                  f"{self.clip_retention_days:g} day(s)")
+
+    def health(self, now=None, tick_seconds=None):
+        """Status snapshot for the heartbeat / healthcheck.
+
+        Everything here was previously computed and discarded — a camera could be
+        stale, unable to publish, or dropping writes with no way to observe it
+        short of reading logs.
+        """
+        now = time.time() if now is None else now
+        grab = self.grab.health()
+        status = {
+            "stale": bool(self._stale),
+            "frame_age": round(grab["frame_age"], 2)
+            if grab["frame_age"] != float("inf") else None,
+            "grabber_alive": grab["thread_alive"],
+            "reconnects": grab["reconnects"],
+            "publishing": self.pub is not None,
+            "score_threshold": self.score_threshold,
+            "writes": self.writer.stats(),
+            "suppression": self.static_suppressor.stats(),
+        }
+        if tick_seconds is not None:
+            status["tick_seconds"] = round(tick_seconds, 4)
+        return status
 
     def close(self):
         """Release this camera's resources. Best-effort; safe to call twice."""

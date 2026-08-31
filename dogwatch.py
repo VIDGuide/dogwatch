@@ -18,6 +18,7 @@ import traceback
 
 from camera_pipeline import CameraPipeline
 from detector import DogDetector, resolve_score_threshold
+from heartbeat import Heartbeat
 from redact import redact
 
 
@@ -134,6 +135,11 @@ def main():
     err_counts = {}
     last_err_log = {}
 
+    # Liveness signal for the container HEALTHCHECK and the host watchdog. The
+    # process staying alive is not evidence that it is still watching anything —
+    # see heartbeat.py.
+    beat = Heartbeat(interval=float(os.environ.get("DOGWATCH_HEARTBEAT_INTERVAL", 5)))
+
     try:
         while True:
             t0 = time.time()
@@ -149,7 +155,11 @@ def main():
                         print(f"[{pipe.name}] tick failed ({n} total): "
                               f"{type(exc).__name__}: {redact(exc)}", flush=True)
                         traceback.print_exc()
+
             dt = time.time() - t0
+            if beat.should_write(t0):
+                beat.write(t0, {p.name: p.health(t0, tick_seconds=dt)
+                                for p in pipelines})
             if dt < interval:
                 time.sleep(interval - dt)
     except KeyboardInterrupt:
