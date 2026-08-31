@@ -68,10 +68,18 @@ Assistant via MQTT.
 Each camera needs its own `config-<name>.json`. See `config.example.json` and
 `config-rear-east.example.json` for the full schema.
 
+**Which keys are per-camera, and which aren't.** Almost everything below is
+per-camera, including `score_threshold`. The exceptions are `model_path` and
+`labels_path`: only one process can bind the Edge TPU, so there is exactly one
+interpreter, built from the first config loaded. If another config names a
+different model, that value is ignored — the detector now logs a warning saying
+so instead of ignoring it silently. On startup it also prints each camera's
+effective `score_threshold`, so you can confirm what's actually in force.
+
 | Key | Description |
 |-----|-------------|
 | `rtsp_url` | RTSP stream URL |
-| `score_threshold` | Minimum detection confidence (0-1) required to fire an event. Default 0.4. Raise this if you're seeing false positives (fence posts, shadows, soil texture misidentified as a dog) — see "Known limitations" below for a documented example. Each event's `attributes` MQTT payload now includes the actual detection `score`, so you can check how confident a specific false positive was before deciding how far to raise this. |
+| `score_threshold` | Minimum detection confidence (0-1) required to fire an event. Default 0.4, and genuinely **per-camera** — raise it on just the camera that's producing false positives (fence posts, shadows, soil texture misidentified as a dog); see "Known limitations" for a documented example. Each event's `attributes` MQTT payload includes the actual detection `score`, so you can check how confident a specific false positive was before deciding how far to raise this. Values outside `(0, 1]` are rejected with a warning and fall back to the default — confidences are fractions, so `0.55`, not `55`. |
 | `snapshot_url` | (Optional) HTTP snapshot URL for clean stills |
 | `crop_roi` | (Optional) `[x1, y1, x2, y2]` normalised 0-1 — zoom into part of frame. Strongly recommended if the camera's full field of view is much wider than the actual fence/zone area: the detection model's input resolution (512×512 for EfficientDet-Lite3, 300×300 for older models) can struggle with small/distant dogs in a wide uncropped frame — see `samples/README.md` for measured evidence. Not currently set for the fence `camera` config, which is the most likely cause of missed detections on that camera specifically. |
 | `fence_zone_norm` | Polygon vertices `[[x,y], ...]` normalised 0-1 **relative to the cropped frame, not the full frame**. If `crop_roi` is set, these coordinates are fractions of the crop — so changing `crop_roi` invalidates an existing zone. Use `render_zone_overlay.py` to check the zone against a real frame grab. A paw point exactly on the polygon edge counts as inside. |
@@ -510,7 +518,10 @@ config flag.
   `score` in their MQTT `attributes` payload (previously dropped
   silently between `detector.py` and the published event), so a run of
   false positives can be checked for a common low-confidence pattern and
-  used to inform raising `score_threshold` for that camera.
+  used to inform raising `score_threshold` for that camera. Raising it for a
+  single camera genuinely works now — it previously had no effect on any camera
+  except the first one loaded, because the shared detector baked in that
+  camera's threshold for the whole fleet.
 
 ### Snapshot quality / grey-frame handling
 
