@@ -45,6 +45,12 @@ class FakeResponse:
         self._payload = payload
         self.status = status
 
+    @property
+    def status_code(self):
+        # The real requests.Response exposes status_code; find-dogs.py's
+        # _reject_redirect() reads it before raise_for_status().
+        return self.status
+
     def raise_for_status(self):
         if self.status >= 400:
             raise RuntimeError(f"{self.status} Too Many Requests")
