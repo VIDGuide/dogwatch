@@ -107,10 +107,35 @@ class BehaviorMonitor:
         return drift <= limit
 
     def evaluate(self, tracks, gray):
-        """Return [(event_type, track_id, bbox, score), ...] to publish."""
+        """Return [(event_type, track_id, bbox, score), ...] to publish.
+
+        *tracks* is the tracker's full live set, which includes tracks that were
+        **not** matched to a detection on this frame — ``CentroidTracker`` keeps
+        a track alive for ``max_misses`` frames so it can survive a brief
+        re-identification gap. Those tracks are skipped here: their ``bbox`` is
+        left over from the last frame they *were* detected on, so evaluating
+        them means reasoning about a dog the model did not just see, at a
+        position it may have left.
+
+        Concretely, before this was skipped, a dog leaving the frame kept firing
+        ``dog_at_fence`` on its stale bbox for up to ``max_misses`` further
+        frames, and both halves of the digging signal read as *more* positive the
+        longer the track went unseen: ``is_stationary`` measures drift over
+        ``history``, which stops being appended to, so drift falls to zero; and
+        ``intra_box_motion`` diffs the current frame against the stale box,
+        which lights up precisely because the dog has moved out of it. Stationary
+        plus busy box is the digging heuristic, so an exiting dog looked briefly
+        like a digging one.
+        """
         events = []
         now = time.time()
         for tid, tr in tracks.items():
+            # misses == 0 means the tracker matched a detection to this track on
+            # this frame (Track.update resets it; an unmatched track increments
+            # it). Anything else is a track being held open on stale pixels.
+            if tr.misses:
+                continue
+
             if not self.in_zone(tr.bbox):
                 tr.dig_since = None
                 continue

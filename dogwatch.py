@@ -54,6 +54,111 @@ def warn_on_shared_key_conflicts(cfgs, names):
                       f"model. (score_threshold, by contrast, IS per-camera.)")
 
 
+def check_topic_collisions(cfgs, names, env=None):
+    """Fail fast when two cameras would publish to the same MQTT base topic.
+
+    Every camera needs its own base topic. The HA discovery payloads are keyed
+    per camera (``dev_id = dogwatch_<name>``), so two cameras sharing a base
+    topic register two *distinct* pairs of entities that both subscribe to the
+    *same* state topic — camera A's dog turns on camera B's sensor, and their
+    retained snapshots overwrite each other. Nothing about that is recoverable
+    or visible from the Home Assistant side; it just looks like both cameras
+    see everything.
+
+    There are two routes into it, and neither used to be checked:
+
+    1. ``MQTT_TOPIC`` in the environment. ``CameraPipeline`` reads it as
+       ``os.environ.get("MQTT_TOPIC", cfg["mqtt_base_topic"])``, so it is a
+       *single global value overriding a per-camera setting*. Setting it with
+       more than one camera configured silently collapses the whole fleet onto
+       one topic. (``MQTT_HOST``/``MQTT_PORT`` are genuinely global — one
+       broker — so they are deliberately not checked here.)
+    2. Two config files that simply both say the same ``mqtt_base_topic``.
+
+    Raising rather than warning: this is a misconfiguration whose only symptom
+    is wrong data, and it is cheaper to refuse at startup than to debug "why
+    does the front camera trigger when the dog is out the back".
+    """
+    env = os.environ if env is None else env
+    if len(cfgs) < 2:
+        return
+
+    override = env.get("MQTT_TOPIC")
+    if override:
+        raise ValueError(
+            f"MQTT_TOPIC={override!r} is set in the environment, but "
+            f"{len(cfgs)} cameras are configured ({', '.join(names)}). "
+            f"MQTT_TOPIC is a single global value and would override every "
+            f"camera's per-camera mqtt_base_topic, collapsing the whole fleet "
+            f"onto one topic. Unset MQTT_TOPIC and set mqtt_base_topic in each "
+            f"config instead (e.g. 'dogwatch' and 'dogwatch/rear-east')."
+        )
+
+    seen = {}
+    for cfg, name in zip(cfgs, names):
+        topic = cfg.get("mqtt_base_topic")
+        if topic is None:
+            continue
+        if topic in seen:
+            raise ValueError(
+                f"Cameras {seen[topic]!r} and {name!r} both use "
+                f"mqtt_base_topic={topic!r}. Each camera needs its own base "
+                f"topic, or their Home Assistant entities and snapshots will "
+                f"overwrite each other."
+            )
+        seen[topic] = name
+
+
+def build_pipelines(cfgs, names, factory=None, log=print):
+    """Construct one pipeline per camera, isolating per-camera startup failures.
+
+    Returns ``(pipelines, failures)`` where *failures* is a list of
+    ``(name, exception)`` for the cameras that could not be brought up.
+
+    Why this is not a plain list comprehension: ``CameraPipeline.__init__``
+    raises when a camera produces no frame within ``startup_timeout_seconds``
+    (default 60). That exception used to propagate straight out of ``main()``,
+    so **one** unreachable camera took down detection for **every** camera:
+    the process exited non-zero, ``restart: unless-stopped`` restarted it, it
+    waited out the timeout again and died again. A healthy camera sharing the
+    container never ticked once, and because no heartbeat was ever written the
+    healthcheck reported unhealthy and ``dogwatch-watchdog.sh`` restarted the
+    container too — the two recovery mechanisms reinforced the loop instead of
+    breaking it.
+
+    That was also inconsistent with the policy this project already decided on
+    for the *running* case. ``heartbeat.evaluate`` deliberately keeps the
+    container healthy when a single camera among several goes stale, on the
+    grounds that the others still work, a restart would disrupt them too, and a
+    camera unplugged for a day should not cause a restart loop. Exactly the same
+    reasoning applies at startup, so the same policy is applied here: bring up
+    what can be brought up, and let a dead camera show as ``unavailable`` in
+    Home Assistant rather than taking the fleet with it.
+
+    *factory* defaults to ``CameraPipeline`` and exists so this is testable
+    without a camera or a TPU. It is resolved at call time rather than captured
+    as the parameter's default, so patching the module attribute works too.
+    """
+    factory = CameraPipeline if factory is None else factory
+    pipelines = []
+    failures = []
+    for cfg, name in zip(cfgs, names):
+        try:
+            pipelines.append(factory(cfg, name))
+        except Exception as exc:
+            failures.append((name, exc))
+            # redact(): the message from a startup timeout embeds rtsp_url, and
+            # an unexpected exception type may embed it too. Format the
+            # traceback rather than using traceback.print_exc() so it goes
+            # through redaction as well — see redact.py's module docstring.
+            log(f"[{name}] FAILED TO START: {type(exc).__name__}: "
+                f"{redact(exc)} — continuing without this camera. The other "
+                f"cameras will run normally; this one will not be retried "
+                f"until the container restarts.")
+            log(redact(traceback.format_exc()))
+    return pipelines, failures
+
+
 def main():
     # Config files: either passed as CLI args, or default to config.json plus
     # any config-*.json files alongside it.
@@ -82,6 +187,10 @@ def main():
     # wastes an afternoon, so say so out loud.
     warn_on_shared_key_conflicts(cfgs, names)
 
+    # Two cameras publishing to one base topic is silently destructive, and
+    # MQTT_TOPIC in the environment is a global override for a per-camera key.
+    check_topic_collisions(cfgs, names)
+
     # Per-camera detection thresholds.
     #
     # score_threshold, unlike model_path, does NOT have to be shared: it's a
@@ -107,14 +216,32 @@ def main():
         extra = " (also the shared inference floor)" if thr == floor else ""
         print(f"[{name}] score_threshold={thr}{extra}")
 
-    # Build a pipeline per camera.
-    pipelines = []
-    for cfg, name in zip(cfgs, names):
-        pipelines.append(CameraPipeline(cfg, name))
+    # Build a pipeline per camera. A camera that cannot produce a frame is
+    # skipped rather than aborting the whole fleet — see build_pipelines.
+    pipelines, failures = build_pipelines(cfgs, names)
+    if not pipelines:
+        # Nothing came up at all, so there is genuinely nothing to do and
+        # exiting non-zero (letting the restart policy retry) is correct. This
+        # is the one case where the old fail-loudly behaviour still applies.
+        raise RuntimeError(
+            "No camera pipelines could be started ("
+            + "; ".join(f"{name}: {redact(exc)}" for name, exc in failures)
+            + ") — check the RTSP URLs/credentials and that the cameras are "
+              "reachable"
+        )
+    if failures:
+        started = ", ".join(p.name for p in pipelines)
+        dead = ", ".join(name for name, _ in failures)
+        print(f"Started {len(pipelines)}/{len(cfgs)} camera(s): {started}. "
+              f"DEGRADED — failed to start: {dead}", flush=True)
 
     # Drive the loop at the SLOWEST camera's target fps (min), so no camera is
-    # sampled faster than it was configured for.
-    target_fps = min(cfg.get("target_fps", 5) for cfg in cfgs)
+    # sampled faster than it was configured for. Computed over the cameras that
+    # actually STARTED, not every config: a camera that failed to come up has no
+    # sampling requirement, and letting its target_fps hold the loop down would
+    # mean an offline slow camera silently throttled a healthy fast one.
+    cfg_by_name = dict(zip(names, cfgs))
+    target_fps = min(cfg_by_name[p.name].get("target_fps", 5) for p in pipelines)
     if target_fps <= 0:
         raise ValueError(
             f"target_fps must be > 0 (got {target_fps}); "
@@ -154,7 +281,15 @@ def main():
                         last_err_log[pipe.name] = t0
                         print(f"[{pipe.name}] tick failed ({n} total): "
                               f"{type(exc).__name__}: {redact(exc)}", flush=True)
-                        traceback.print_exc()
+                        # format_exc() + redact(), not print_exc(): the
+                        # traceback's final line is the exception message, and a
+                        # cv2/requests error raised from the frame grabber or the
+                        # snapshot fetch embeds the credential-bearing camera
+                        # URL. print_exc() writes straight to stderr with no
+                        # chance to redact, so the message above was masked while
+                        # the identical string leaked one line below it. See
+                        # redact.py's module docstring for the rule.
+                        print(redact(traceback.format_exc()), flush=True)
 
             dt = time.time() - t0
             if beat.should_write(t0):

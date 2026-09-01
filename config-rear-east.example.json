@@ -8,7 +8,7 @@
   "score_threshold": 0.55,
   "snapshot_url": "http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture",
   "target_fps": 5,
-  "clip_dir": "clips",
+  "clip_dir": "clips-rear-east",
   "crop_roi": [
     0.70,
     0.10,
