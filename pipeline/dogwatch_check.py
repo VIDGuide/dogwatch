@@ -85,6 +85,12 @@ DEFAULT_FALLBACK_MODEL = "google/gemini-3-flash-preview"
 MAX_DESCRIPTION_CHARS = 300
 TELEGRAM_CAPTION_LIMIT = 900
 
+# Directories an event's ``snapshot`` field is allowed to point into, and the
+# filename prefixes allowed inside them. See ``safe_snapshot_path``.
+DEFAULT_SNAPSHOT_ALLOW_DIRS = ("/tmp",)
+SNAPSHOT_NAME_PREFIXES = ("dogwatch_snap_", "dogwatch_check_", "dogwatch_")
+SNAPSHOT_SUFFIXES = (".jpg", ".jpeg")
+
 
 def _env_float(env, name, default):
     raw = env.get(name, "")
@@ -111,6 +117,17 @@ class Config:
             "DOGWATCH_WORKSPACE_DIR",
             os.path.join(os.path.expanduser("~"), ".openclaw/workspace/dogwatch_snaps"),
         )
+        # Directories an event's ``snapshot`` path may resolve into. Colon
+        # separated, same convention as PATH. The workspace dir is always
+        # allowed (that is where we stage copies ourselves).
+        raw_allow = env.get("DOGWATCH_SNAPSHOT_ALLOW_DIRS", "")
+        allow = ([p for p in raw_allow.split(":") if p]
+                 if raw_allow else list(DEFAULT_SNAPSHOT_ALLOW_DIRS))
+        allow.append(self.workspace_dir)
+        # realpath so the comparison in safe_snapshot_path is symlink-stable
+        # (on macOS /tmp is itself a symlink to /private/tmp, for instance).
+        self.snapshot_allow_dirs = tuple(
+            dict.fromkeys(os.path.realpath(os.path.expanduser(p)) for p in allow))
         self.secrets_file = os.path.expanduser(
             env.get("DOGWATCH_SECRETS_FILE", "~/.openclaw/secrets.json"))
         self.notify_config = env.get(
@@ -723,6 +740,63 @@ def label_for(topic):
     return slug
 
 
+def safe_snapshot_path(cfg, snap):
+    """Return *snap* if it is a snapshot we are willing to read, else "".
+
+    The ``snapshot`` field comes out of the event log, and everything we do
+    with it is an exfiltration primitive: ``_stage_snapshot`` copies it into
+    the workspace dir, ``Telegram.send_photo`` uploads it to a chat, and
+    ``verify`` base64s it to a third-party vision API. Nothing downstream ever
+    re-checks what the path points at.
+
+    The event log's own default location is ``/tmp/dogwatch-events.jsonl`` —
+    a predictable name in a world-writable directory, and an append-only
+    JSONL file, so "append one more line" is the whole attack. A single
+    ``{"ts": ..., "topic": ..., "state": "ON", "snapshot": "/root/.openclaw/
+    secrets.json"}`` would have had us Telegram the file out. The same holds
+    on the host-cron deployment the README documents, where /tmp is shared
+    with every local account.
+
+    So the path is constrained to what the writers actually produce:
+
+    * ``dogwatch-notify.py`` writes ``/tmp/dogwatch_snap_<camera>_<ts>.jpg``
+    * ``capture_fresh`` writes ``/tmp/dogwatch_check_<camera>_<ts>.jpg``
+    * ``_stage_snapshot`` writes ``<workspace>/dogwatch_<ts>.jpg``
+
+    Checks: the path must resolve (``realpath``, so a planted symlink is
+    followed *before* the decision, not after) to a regular file sitting
+    directly in an allowed directory, with an expected name prefix and a JPEG
+    suffix. Override the directory list with
+    ``DOGWATCH_SNAPSHOT_ALLOW_DIRS`` if you relocate the notifier's tmp dir.
+    """
+    if not snap or not isinstance(snap, str):
+        return ""
+
+    def reject(reason):
+        print(f"  WARN: ignoring snapshot path {snap!r} from event log: {reason}",
+              file=sys.stderr)
+        return ""
+
+    if not os.path.isabs(snap):
+        return reject("not an absolute path")
+    real = os.path.realpath(snap)
+    parent, name = os.path.split(real)
+    if parent not in cfg.snapshot_allow_dirs:
+        return reject(f"resolves outside the allowed directories "
+                      f"({', '.join(cfg.snapshot_allow_dirs)})")
+    if not name.lower().endswith(SNAPSHOT_SUFFIXES):
+        return reject("not a .jpg/.jpeg file")
+    if not name.startswith(SNAPSHOT_NAME_PREFIXES):
+        return reject("filename is not a dogwatch snapshot name")
+    # islink() on the original catches the planted-symlink case explicitly so
+    # it is logged as such; realpath above already made it non-exploitable.
+    if os.path.islink(snap):
+        return reject(f"is a symlink (-> {real})")
+    if not os.path.isfile(real):
+        return reject("not a regular file")
+    return real
+
+
 def collect_pending(cfg, state, cameras, now=None):
     """Read new events and return ``(pending, max_seen_ts, end_offset)``.
 
@@ -758,8 +832,11 @@ def collect_pending(cfg, state, cameras, now=None):
         camera = event.get("camera", "camera")
         label = label_for(topic)
         ts_local = time.strftime("%H:%M:%S", time.localtime(ts))
-        snap = event.get("snapshot", "")
-        has_stored = bool(snap and os.path.exists(snap))
+        # safe_snapshot_path also subsumes the old os.path.exists() check: it
+        # returns "" for anything missing, and only ever returns a path we are
+        # willing to copy, upload and send to the vision API.
+        snap = safe_snapshot_path(cfg, event.get("snapshot", ""))
+        has_stored = bool(snap)
         key = (camera, label)
 
         if key in seen:

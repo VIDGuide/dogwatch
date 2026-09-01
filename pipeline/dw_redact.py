@@ -16,7 +16,9 @@ See ``redact.py`` for the full rationale — the short version is that
 ``subprocess.TimeoutExpired``/``CalledProcessError`` stringify their entire
 argv, and the ffmpeg argv always contains a credential-bearing camera URL,
 so an ordinary camera timeout would otherwise print
-``rtsp://user:pass@host`` straight into the logs.
+``rtsp://user:pass@host`` straight into the logs. ``requests`` does the same
+with the request URL, which is how the Telegram bot token (carried in the URL
+path, by Bot API design) reached the logs from ``find-dogs.py``.
 """
 import re
 
@@ -31,18 +33,26 @@ _CREDS_RE = re.compile(
     r"@"                               # literal @ terminating userinfo
 )
 
+# Telegram bot token, which the Bot API carries in the URL path
+# (``/bot<bot_id>:<auth_string>/<method>``) rather than a header. Requiring the
+# ``<digits>:<rest>`` shape keeps this off ordinary paths like ``/bots/list``.
+# See redact.py for the leak this closes.
+_TG_TOKEN_RE = re.compile(r"(/bot)(\d+:[A-Za-z0-9_\-]+)")
+
 
 def redact_url(value):
-    """Return *value* as a string with any ``user:pass@`` userinfo masked.
+    """Return *value* as a string with any embedded credential masked.
 
-    Safe to wrap around an exception object; never raises.
+    Covers ``user:pass@`` userinfo and Telegram ``/bot<token>/`` path
+    segments. Safe to wrap around an exception object; never raises.
     """
     try:
         text = value if isinstance(value, str) else str(value)
     except Exception:
         return "<unprintable>"
     try:
-        return _CREDS_RE.sub(rf"\1{PLACEHOLDER}@", text)
+        text = _CREDS_RE.sub(rf"\1{PLACEHOLDER}@", text)
+        return _TG_TOKEN_RE.sub(rf"\1{PLACEHOLDER}", text)
     except Exception:
         return "<redaction-failed>"
 

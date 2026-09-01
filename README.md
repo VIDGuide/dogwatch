@@ -134,8 +134,20 @@ and `MQTT_PORT` are genuinely global — one broker — so they are unaffected.)
 **MQTT security note:** by default the broker connection is plaintext and
 unauthenticated, which is fine for a broker that never leaves
 localhost/a trusted LAN. If your broker is reachable beyond that (a
-different host, a VPN, etc.), set `mqtt_username`/`mqtt_password` and
-`mqtt_tls: true`.
+different host, a VPN, etc.), secure *both* sides:
+
+| Side | Where to set it | Keys |
+| --- | --- | --- |
+| Detector (`dogwatch`) | `config.json` per camera | `mqtt_username`, `mqtt_password`, `mqtt_tls` |
+| Notifier + find-dogs listener (`dogwatch-notify`) | environment (see `docker-compose.yml`) | `MQTT_USERNAME`, `MQTT_PASSWORD`, `MQTT_TLS`, `MQTT_TLS_CA_CERT`, `MQTT_TLS_INSECURE` |
+
+The notifier side matters at least as much as the detector's: these are
+*subscribers* that act on what they receive. `find-dogs-mqtt.py` runs a full
+camera scan on any message to `<base>/find-dogs/trigger/+`, and the notifier
+sends Telegram alerts and republishes snapshots — so on an exposed broker,
+anyone who can reach the port can drive both. Each process logs its posture
+at startup (`auth=none tls=off`), so you can confirm what is actually in
+effect rather than what you meant to configure.
 
 ### Credentials and what reaches the broker / the logs
 

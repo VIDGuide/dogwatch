@@ -12,9 +12,29 @@ frame — exactly what these heuristics exist to catch — was fed to the vision
 model, which correctly answered NO_DOG, producing a "❌ False alarm" message
 for a *real* dog and suppressing the siren. Both callers now share this.
 """
+import warnings
+
 from PIL import Image, ImageStat
 
-__all__ = ["active_tile_fraction", "is_image_bad", "validate_image_file"]
+__all__ = ["active_tile_fraction", "is_image_bad", "validate_image_file",
+           "MAX_IMAGE_PIXELS"]
+
+# Explicit decompression-bomb ceiling.
+#
+# Pillow's own default (~179M pixels) only emits a *warning* — it does not
+# raise until twice that — and a warning goes nowhere useful here, because
+# every caller wraps Image.open in `except Exception` and just reports "cannot
+# decode". So a hostile or malfunctioning JPEG could have us allocate
+# gigabytes decoding a frame we were about to reject anyway.
+#
+# 40M pixels is ~8000x5000: an order of magnitude above the largest stream
+# this project reads (a 4K frame is ~8.3M), so it constrains nothing real.
+# Pillow raises DecompressionBombError above 2x this value and
+# DecompressionBombWarning above it; we want the hard failure, so callers that
+# open untrusted files should treat the warning as an error too — see
+# validate_image_file.
+MAX_IMAGE_PIXELS = 40_000_000
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 # Layer 1: size floor.
 #
@@ -93,7 +113,13 @@ def validate_image_file(path, min_bytes=MIN_BYTES, log=None):
         _say(f"  Snapshot rejected: {size} bytes < {min_bytes} min (likely corruption)")
         return False
     try:
-        gray = Image.open(path).convert("L")
+        # Promote Pillow's DecompressionBombWarning to an exception for the
+        # duration of the decode: by default an oversized image only warns
+        # (and the warning would be swallowed), so the allocation happens
+        # anyway. Scoped with catch_warnings so we don't alter global state.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            gray = Image.open(path).convert("L")
     except Exception as exc:
         _say(f"  Snapshot rejected: cannot decode ({exc})")
         return False

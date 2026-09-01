@@ -23,6 +23,7 @@ COPY stats.py /app/
 # Shared helper modules imported by the scripts above.
 COPY dw_redact.py /app/
 COPY image_quality.py /app/
+COPY mqtt_auth.py /app/
 RUN chmod +x /app/dogwatch-check.sh /app/dog-alarm.sh /app/find-dogs.py /app/find-dogs-mqtt.py
 
 WORKDIR /app

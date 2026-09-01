@@ -46,6 +46,8 @@ import time
 
 import paho.mqtt.client as mqtt
 
+from mqtt_auth import apply_mqtt_auth
+
 # Daily stats capture (per-day counters for the Daily Dog Report). Fail
 # gracefully if the module is missing (older image) — capture must never
 # break the listener.
@@ -288,8 +290,13 @@ def main():
     client.on_connect = on_connect
     client.on_message = on_message
     client.reconnect_delay_set(min_delay=1, max_delay=60)
+    # Optional broker credentials / TLS (see mqtt_auth.py). This listener
+    # shells out to a full camera scan on any trigger message, so on an
+    # unauthenticated broker anyone who can reach the port can drive it.
+    security = apply_mqtt_auth(client)
     _client = client
-    print(f'find-dogs-mqtt: connecting to {MQTT_HOST}:{MQTT_PORT}', flush=True)
+    print(f'find-dogs-mqtt: connecting to {MQTT_HOST}:{MQTT_PORT} ({security})',
+          flush=True)
     client.connect(MQTT_HOST, MQTT_PORT, 60)
     client.loop_forever()
 

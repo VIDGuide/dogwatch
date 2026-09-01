@@ -43,6 +43,28 @@ from snapshot_quality import is_image_bad
 from static_suppressor import StaticSuppressor
 from tracker import CentroidTracker
 
+# Ceiling for an HTTP (ISAPI) snapshot body. A main-stream still is a few
+# hundred KB, so this is not a functional limit — it exists so the read is
+# bounded rather than "however much the device sends".
+MAX_SNAPSHOT_BYTES = int(os.environ.get("DOGWATCH_MAX_SNAPSHOT_BYTES", 16 * 1024 * 1024))
+
+
+def _read_capped(resp, limit):
+    """Read *resp*'s body, returning None if it exceeds *limit* bytes."""
+    chunks = []
+    total = 0
+    try:
+        for chunk in resp.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > limit:
+                return None
+            chunks.append(chunk)
+    finally:
+        resp.close()
+    return b"".join(chunks)
+
 
 class CameraPipeline:
     """One camera's full processing chain: grab, track, monitor, publish."""
@@ -251,11 +273,21 @@ class CameraPipeline:
                 user, pw = parsed.username, parsed.password
                 clean_url = url.replace(f"{user}:{pw}@", "") if user else url
 
+                # stream=True + a byte cap rather than resp.content: this body
+                # comes from a LAN device over plaintext HTTP and was read
+                # into memory with no ceiling. See MAX_SNAPSHOT_BYTES.
                 resp = requests.get(clean_url, auth=HTTPDigestAuth(user, pw),
-                                    timeout=5)
+                                    timeout=5, stream=True)
                 resp.raise_for_status()
 
-                arr = np.frombuffer(resp.content, dtype=np.uint8)
+                body = _read_capped(resp, MAX_SNAPSHOT_BYTES)
+                if body is None:
+                    print(f"[{self.name}] HTTP snapshot exceeded "
+                          f"{MAX_SNAPSHOT_BYTES} bytes — discarded "
+                          f"(attempt {attempt + 1})")
+                    continue
+
+                arr = np.frombuffer(body, dtype=np.uint8)
                 img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
                 if img is not None and not is_image_bad(img):

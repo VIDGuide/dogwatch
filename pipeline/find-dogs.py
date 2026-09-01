@@ -27,8 +27,11 @@ Config: "find_dogs" section in dogwatch-notify.config.json (gitignored):
 Channel names come from config find_dogs.channel_names when present, falling
 back to a live NVR ISAPI fetch (so labels stay readable even where the NVR
 still shows default names like "IPCamera 03").
-Env overrides: DOGWATCH_FIND_DOGS_NVR_HOST/_USER/_PASSWORD, and the channel
-ids can be passed on the command line.
+Env overrides: DOGWATCH_FIND_DOGS_NVR_HOST/_USER/_PASSWORD/_SCHEME/_VERIFY_TLS,
+and the channel ids can be passed on the command line. The ISAPI channel-name
+fetch defaults to http (that is what Hikvision NVRs serve out of the box); set
+_SCHEME=https if you have enabled HTTPS on the NVR, plus _VERIFY_TLS=false if
+it presents a self-signed cert.
 
 Vision: same pipeline as dogwatch-check.sh — Gemini (OpenAI-compatible
 endpoint) primary, OpenRouter fallback. Keys from secrets.json providers
@@ -50,6 +53,13 @@ import requests
 from PIL import Image, ImageDraw, ImageFont, ImageStat
 
 from dw_redact import redact
+from image_quality import MAX_IMAGE_PIXELS
+
+# Match image_quality's decompression-bomb ceiling. This module opens frames
+# with PIL directly (its own port of the quality checks, no cv2 in this image)
+# and Pillow's default limit only warns rather than raising, so an oversized
+# frame from a compromised camera/NVR would still be decoded in full.
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 # ---------------------------------------------------------------------------
 # Paths / config resolution (same order as dogwatch-check.sh / dog-alarm.sh)
@@ -122,6 +132,18 @@ def load_config():
                                fd.get('nvr_user', '')),
         'password': os.environ.get('DOGWATCH_FIND_DOGS_NVR_PASSWORD',
                                    fd.get('nvr_password', '')),
+        # http by default (all Hikvision ISAPI offers until HTTPS is enabled
+        # on the NVR), but no longer hardcoded — see fetch_channels.
+        'scheme': os.environ.get('DOGWATCH_FIND_DOGS_NVR_SCHEME',
+                                 fd.get('nvr_scheme', 'http')),
+        # Verification on by default. NVRs commonly present a self-signed
+        # cert, so switching to https may need this turned off — but that
+        # should be a deliberate choice that fails loudly first, not a silent
+        # default that makes https look secure when it isn't.
+        'verify_tls': str(os.environ.get(
+            'DOGWATCH_FIND_DOGS_NVR_VERIFY_TLS',
+            fd.get('nvr_verify_tls', 'true'))
+        ).strip().lower() not in ('0', 'false', 'no', 'off'),
     }
     if not nvr['host'] or not nvr['user'] or not nvr['password']:
         print('ERROR: find_dogs.nvr_host/user/password not configured',
@@ -173,14 +195,30 @@ def load_vision_keys():
 # NVR channel list (live from ISAPI, digest auth)
 # ---------------------------------------------------------------------------
 def fetch_channels(nvr):
-    """Return {channel_id: name} for all NVR input channels."""
-    url = (f'http://{nvr["host"]}/ISAPI/ContentMgmt/InputProxy/channels')
+    """Return {channel_id: name} for all NVR input channels.
+
+    Scheme is configurable (``DOGWATCH_FIND_DOGS_NVR_SCHEME`` or the
+    ``nvr_scheme`` config key) because it used to be a hardcoded ``http://``.
+    Digest auth over cleartext still exposes the challenge/response to anyone
+    on the path, and while the default stays http (that is all Hikvision ISAPI
+    offers until you enable HTTPS on the NVR), a deployment that *has* turned
+    HTTPS on previously had no way to use it here — unlike the notifier's
+    ``snapshot_url``, which is a full URL and so always could.
+    """
+    scheme = (nvr.get('scheme') or 'http').rstrip(':/')
+    if scheme not in ('http', 'https'):
+        print(f'WARN: ignoring unsupported NVR scheme {scheme!r} — using http',
+              file=sys.stderr)
+        scheme = 'http'
+    url = f'{scheme}://{nvr["host"]}/ISAPI/ContentMgmt/InputProxy/channels'
     try:
         r = requests.get(url, auth=requests.auth.HTTPDigestAuth(
-            nvr['user'], nvr['password']), timeout=10)
+            nvr['user'], nvr['password']), timeout=10,
+            verify=nvr.get('verify_tls', True))
         r.raise_for_status()
     except Exception as e:
-        print(f'WARN: cannot fetch NVR channel names ({e}) — using ids only',
+        # redact(): requests embeds the request URL in its exception text.
+        print(f'WARN: cannot fetch NVR channel names ({redact(e)}) — using ids only',
               file=sys.stderr)
         return {}
     names = {}
@@ -313,6 +351,20 @@ PROMPT = (
 )
 
 
+def _reject_redirect(r):
+    """Raise on a 3xx from an API call made with allow_redirects=False.
+
+    raise_for_status() only covers 4xx/5xx, so without this a redirect would
+    fall through to r.json() and surface as an unhelpful JSON decode error
+    instead of "the endpoint redirected us". Location is deliberately not
+    interpolated raw — it is attacker-chosen if the endpoint is compromised.
+    """
+    if 300 <= r.status_code < 400:
+        raise requests.exceptions.HTTPError(
+            f'{r.status_code} redirect refused (allow_redirects=False); '
+            f'Location host={redact(r.headers.get("Location", ""))[:120]!r}')
+
+
 def vision_verify_with(image_path, api_url, model, api_key, label):
     """Run one vision provider. Returns ``(dog, activity, description)``.
 
@@ -352,7 +404,16 @@ def vision_verify_with(image_path, api_url, model, api_key, label):
         headers['HTTP-Referer'] = 'https://github.com/VIDGuide/dogwatch'
         headers['X-Title'] = 'DogWatch'
     try:
-        r = requests.post(api_url, json=payload, headers=headers, timeout=30)
+        # allow_redirects=False: a chat-completions endpoint has no legitimate
+        # reason to redirect, and api_url is operator-configurable
+        # (DOGWATCH_VISION_API_URL), so following one just widens where this
+        # request — Bearer key included — can end up. requests does strip
+        # Authorization across hosts, but on a same-host redirect it does not,
+        # and a 307/308 replays the full body too. Failing loudly on an
+        # unexpected 3xx is more useful than silently chasing it.
+        r = requests.post(api_url, json=payload, headers=headers, timeout=30,
+                          allow_redirects=False)
+        _reject_redirect(r)
         r.raise_for_status()
         result = r.json()
     except Exception as e:
@@ -441,7 +502,10 @@ def _deepseek_line(prompt):
     headers = {'Content-Type': 'application/json',
                'Authorization': f'Bearer {api_key}'}
     try:
-        r = requests.post(api_url, json=payload, headers=headers, timeout=20)
+        # allow_redirects=False — see vision_verify_with for the reasoning.
+        r = requests.post(api_url, json=payload, headers=headers, timeout=20,
+                          allow_redirects=False)
+        _reject_redirect(r)
         r.raise_for_status()
         result = r.json()
         text = ''
@@ -585,6 +649,14 @@ def bedtime_gate():
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
+# The bot token goes in the URL path because that is the only form the
+# Telegram Bot API accepts. That makes redact() mandatory on these error
+# paths: requests puts the request URL in its exception text, so
+# `print(f'...: {e}')` on an ordinary ConnectionError published a live bot
+# token to the log —
+#   HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries
+#   exceeded with url: /bot<TOKEN>/sendMessage
+# and "the internet blipped" is a routine event, not an edge case.
 def tg_send(token, chat_id, text):
     try:
         r = requests.post(
@@ -592,7 +664,7 @@ def tg_send(token, chat_id, text):
             json={'chat_id': chat_id, 'text': text}, timeout=15)
         return r.ok
     except Exception as e:
-        print(f'  TG send error: {e}', file=sys.stderr)
+        print(f'  TG send error: {redact(e)}', file=sys.stderr)
         return False
 
 
@@ -605,7 +677,7 @@ def tg_send_photo(token, chat_id, photo_path, caption):
                 files={'photo': ('frame.jpg', f, 'image/jpeg')}, timeout=30)
         return r.ok
     except Exception as e:
-        print(f'  TG photo error: {e}', file=sys.stderr)
+        print(f'  TG photo error: {redact(e)}', file=sys.stderr)
         return False
 
 

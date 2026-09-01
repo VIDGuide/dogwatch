@@ -22,6 +22,7 @@ from requests.auth import HTTPDigestAuth
 
 from dw_redact import redact
 from image_quality import validate_image_file
+from mqtt_auth import apply_mqtt_auth
 
 STATUS_FILE = "/tmp/dogwatch-events.jsonl"
 
@@ -545,6 +546,38 @@ def _validate_image(path: str) -> bool:
     return validate_image_file(path, log=print)
 
 
+# Ceiling for an HTTP snapshot body. A rear-east main-stream still is ~300KB
+# and the fence sub-stream ~28KB, so 16MB is not a functional limit — it is
+# only there to stop an unbounded read.
+MAX_SNAPSHOT_BYTES = int(os.environ.get("DOGWATCH_MAX_SNAPSHOT_BYTES", 16 * 1024 * 1024))
+
+
+def _write_capped(resp, path: str, limit: int):
+    """Stream *resp* to *path*, aborting if the body exceeds *limit* bytes.
+
+    Returns the number of bytes written, or None if the cap was hit (in which
+    case the partial file is removed, so nothing downstream can pick it up).
+    """
+    total = 0
+    try:
+        with open(path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > limit:
+                    f.close()
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                    return None
+                f.write(chunk)
+    finally:
+        resp.close()
+    return total
+
+
 def capture_snapshot(camera_name: str) -> str:
     """Grab a clean frame from the camera.  Returns file path or ''.
 
@@ -616,10 +649,23 @@ def capture_snapshot(camera_name: str) -> str:
             parsed = requests.utils.urlparse(cam["snapshot_url"])
             user, pw = parsed.username, parsed.password
             clean_url = cam["snapshot_url"].replace(f"{user}:{pw}@", "") if user else cam["snapshot_url"]
-            resp = requests.get(clean_url, auth=HTTPDigestAuth(user, pw), timeout=10)
+            # stream=True + a byte cap instead of resp.content: this reads a
+            # response from a device on the LAN, over plaintext HTTP by
+            # default (that is all Hikvision ISAPI offers out of the box), and
+            # resp.content buffers the whole body in memory with no ceiling.
+            # A misbehaving or spoofed responder could hand back an
+            # arbitrarily long body and OOM the notifier — which is PID 1 in
+            # its container, so that takes down alerting entirely. A snapshot
+            # is a few hundred KB; the cap is generous by two orders of
+            # magnitude and still bounded.
+            resp = requests.get(clean_url, auth=HTTPDigestAuth(user, pw),
+                                timeout=10, stream=True)
             resp.raise_for_status()
-            with open(snap_path, "wb") as f:
-                f.write(resp.content)
+            written = _write_capped(resp, snap_path, MAX_SNAPSHOT_BYTES)
+            if written is None:
+                print(f"  HTTP snapshot fallback: response exceeded "
+                      f"{MAX_SNAPSHOT_BYTES} bytes — discarded")
+                return ""
             if os.path.getsize(snap_path) > 100:
                 print(f"  HTTP fallback snapshot: {os.path.getsize(snap_path)} bytes")
                 return snap_path
@@ -897,6 +943,11 @@ def main():
     # reconnect, no error, and no indication anywhere that publishes were
     # going nowhere).
     client.reconnect_delay_set(min_delay=1, max_delay=60)
+    # Optional broker credentials / TLS. Must be set before connect_async;
+    # paho applies both to the initial connection and to every reconnect.
+    # See mqtt_auth.py for why this is opt-in and why the notifier needs it
+    # at least as much as the detector's publisher does.
+    mqtt_security = apply_mqtt_auth(client)
     # connect_async, not connect(): a synchronous connect() raises when the
     # broker isn't up yet, which would kill the notifier at startup (it is PID 1
     # in its container, so the whole container restart-loops until the broker
@@ -904,7 +955,8 @@ def main():
     # and all retries to the network loop, so "broker not up yet" becomes an
     # ordinary recoverable state instead of a crash.
     client.connect_async(MQTT_HOST, MQTT_PORT, 60)
-    print(f"Dogwatch notifier listening on {BASE_TOPIC}/#")
+    print(f"Dogwatch notifier listening on {BASE_TOPIC}/# "
+          f"({MQTT_HOST}:{MQTT_PORT} {mqtt_security})")
 
     _start_mqtt_watchdog(client)
 
