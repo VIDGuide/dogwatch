@@ -77,8 +77,8 @@ from dw_redact import redact
 
 DEFAULT_VISION_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_VISION_MODEL = "qwen/qwen3.7-flash"
-DEFAULT_FALLBACK_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_FALLBACK_MODEL = "google/gemini-3-flash-preview"
+DEFAULT_FALLBACK_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+DEFAULT_FALLBACK_MODEL = "gemini-3-flash-preview"
 
 # Telegram's hard caption limit is 1024 chars; keep well clear of it and leave
 # room for our own formatting around the model's sentence.

@@ -392,8 +392,8 @@ environment or a wrapper script):
 | `DOGWATCH_VISION_API_URL` | OpenRouter chat completions endpoint | Primary chat completions endpoint URL |
 | `DOGWATCH_VISION_MODEL` | `qwen/qwen3.7-flash` | Primary model name to request |
 | `DOGWATCH_VISION_API_KEY` | (falls back to `secrets.json`) | API key, sent as a `Bearer` token |
-| `DOGWATCH_VISION_FALLBACK_API_URL` | OpenRouter chat completions endpoint | Fallback endpoint, tried when the primary fails |
-| `DOGWATCH_VISION_FALLBACK_MODEL` | `google/gemini-3-flash-preview` | Fallback model name |
+| `DOGWATCH_VISION_FALLBACK_API_URL` | Google Gemini OpenAI-compat endpoint | Fallback endpoint, tried when the primary fails |
+| `DOGWATCH_VISION_FALLBACK_MODEL` | `gemini-3-flash-preview` | Fallback model name |
 | `DOGWATCH_VISION_FALLBACK_API_KEY` | (falls back to `secrets.json`) | Fallback API key |
 
 The primary is OpenRouter + Qwen (fast, cheap, strong on small objects in wide
@@ -403,12 +403,12 @@ tier started 429ing mid-scan. When a key is unset it is resolved from
 being called (`models.providers.openrouter.apiKey` for `openrouter.ai`,
 `models.providers.google.apiKey` otherwise), so the key always matches the API.
 
-**The fallback only helps if it is a genuinely different provider.** With the
-defaults, primary and fallback resolve to the same OpenRouter endpoint *and*
-the same key, so an account-level 429 rejects both identically. The check
-script detects that case, logs it, and skips the pointless second call — point
-`DOGWATCH_VISION_FALLBACK_API_URL`/`_API_KEY` at a different provider for a
-fallback that actually adds resilience. Note also that there is **no retry or
+**The fallback is a genuinely different provider.** The default fallback is
+Google's native OpenAI-compatible endpoint, so an OpenRouter account-level 429
+(or vice versa) is caught by the other provider. If you point the fallback at
+the *same* endpoint and key as the primary, the check script detects that
+case, logs it, and skips the pointless second call — an account-level 429
+would reject the retry identically. Note also that there is **no retry or
 backoff**: each configured provider is attempted exactly once per event.
 
 ### Dog Alarm (optional — siren via Home Assistant)

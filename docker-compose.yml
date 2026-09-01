@@ -67,10 +67,10 @@ services:
       # MQTT_PASSWORD: ""
       # MQTT_TLS: "true"
       # MQTT_TLS_CA_CERT: "/app/mqtt-ca.crt"
-      # Vision verification (defaults to Gemini free tier via OpenAI-compat
-      # endpoint). Override for a different provider. If the primary fails
-      # (e.g. Gemini 429 quota), the check script automatically falls back to
-      # OpenRouter (key from secrets.json "openrouter" provider by default).
+      # Vision verification. Primary: OpenRouter + Qwen (fast, cheap, strong
+      # on small objects). Fallback: Google Gemini native OpenAI-compat
+      # endpoint with the secrets.json "google" key — a genuinely different
+      # provider, so an OpenRouter 429 doesn't kill the follow-up.
       # DOGWATCH_VISION_API_URL: ""
       # DOGWATCH_VISION_MODEL: ""
       # DOGWATCH_VISION_API_KEY: ""
