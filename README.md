@@ -395,6 +395,9 @@ environment or a wrapper script):
 | `DOGWATCH_VISION_FALLBACK_API_URL` | Google Gemini OpenAI-compat endpoint | Fallback endpoint, tried when the primary fails |
 | `DOGWATCH_VISION_FALLBACK_MODEL` | `gemini-3-flash-preview` | Fallback model name |
 | `DOGWATCH_VISION_FALLBACK_API_KEY` | (falls back to `secrets.json`) | Fallback API key |
+| `DOGWATCH_VISION_FALLBACK2_API_URL` | DeepSeek chat completions endpoint | Second fallback endpoint (tried after the first fallback) |
+| `DOGWATCH_VISION_FALLBACK2_MODEL` | `deepseek-v4-flash-vision-exp` | Second fallback model name |
+| `DOGWATCH_VISION_FALLBACK2_API_KEY` | (falls back to `secrets.json`) | Second fallback API key |
 
 The primary is OpenRouter + Qwen (fast, cheap, strong on small objects in wide
 frames); **Gemini is the fallback, not the default** — it moved when the free
@@ -403,9 +406,11 @@ tier started 429ing mid-scan. When a key is unset it is resolved from
 being called (`models.providers.openrouter.apiKey` for `openrouter.ai`,
 `models.providers.google.apiKey` otherwise), so the key always matches the API.
 
-**The fallback is a genuinely different provider.** The default fallback is
-Google's native OpenAI-compatible endpoint, so an OpenRouter account-level 429
-(or vice versa) is caught by the other provider. If you point the fallback at
+**The fallbacks are genuinely different providers.** The defaults try
+OpenRouter + Qwen first, then Google's native OpenAI-compatible endpoint
+(Gemini), then DeepSeek's vision model — three independent providers with
+separate quotas, so an account-level 429 (or outage) on any one of them is
+caught by the next. If you point the fallback at
 the *same* endpoint and key as the primary, the check script detects that
 case, logs it, and skips the pointless second call — an account-level 429
 would reject the retry identically. Note also that there is **no retry or

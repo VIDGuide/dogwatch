@@ -507,11 +507,14 @@ class TestResolveCredentials:
         secrets = {"models": {"providers": {
             "openrouter": {"apiKey": "or-key"},
             "google": {"apiKey": "g-key"},
+            "deepseek": {"apiKey": "ds-key"},
         }}}
         assert dc.resolve_provider_key(
             "https://openrouter.ai/api/v1/chat/completions", secrets) == "or-key"
         assert dc.resolve_provider_key(
             "https://generativelanguage.googleapis.com/v1beta/x", secrets) == "g-key"
+        assert dc.resolve_provider_key(
+            "https://api.deepseek.com/chat/completions", secrets) == "ds-key"
 
     def test_provider_key_missing_returns_empty(self):
         assert dc.resolve_provider_key("https://openrouter.ai/x", {}) == ""
@@ -572,6 +575,50 @@ class TestVisionFallbackGuard:
 
         def fake_verify(*a, **k):
             calls.append(a[4])  # provider_label
+            return None
+
+        dc.vision_verify_with, orig = fake_verify, dc.vision_verify_with
+        try:
+            verify = dc.make_vision_verifier(cfg)
+            assert verify("/tmp/x.jpg") is None
+        finally:
+            dc.vision_verify_with = orig
+        assert calls == ["primary"]
+        assert "same endpoint+key" in capsys.readouterr().err
+
+    def test_third_tier_used_when_first_two_fail(self, tmp_path):
+        """primary and fallback fail -> fallback2 (DeepSeek) is tried."""
+        cfg = make_cfg(tmp_path)
+        cfg.vision_url = "https://openrouter.ai/api/v1/chat/completions"
+        cfg.vision_key = "or-key"
+        cfg.fallback_url = "https://generativelanguage.googleapis.com/v1beta/x"
+        cfg.fallback_key = "g-key"
+        cfg.fallback2_url = "https://api.deepseek.com/chat/completions"
+        cfg.fallback2_key = "ds-key"
+        calls = []
+
+        def fake_verify(image_path, api_url, model, api_key, label, **k):
+            calls.append(label)
+            return None if label != "fallback2" else {"dog": "DOG", "digging": False}
+
+        dc.vision_verify_with, orig = fake_verify, dc.vision_verify_with
+        try:
+            verify = dc.make_vision_verifier(cfg)
+            result = verify("/tmp/x.jpg")
+        finally:
+            dc.vision_verify_with = orig
+        assert calls == ["primary", "fallback", "fallback2"]
+        assert result["dog"] == "DOG"
+
+    def test_fallback2_skipped_when_duplicate_of_primary(self, tmp_path, capsys):
+        """fallback2 pointing at the same endpoint+key as primary is skipped."""
+        cfg = make_cfg(tmp_path)
+        cfg.vision_url = cfg.fallback2_url = "https://openrouter.ai/api/v1/chat/completions"
+        cfg.vision_key = cfg.fallback2_key = "same-key"
+        calls = []
+
+        def fake_verify(*a, **k):
+            calls.append(a[4])
             return None
 
         dc.vision_verify_with, orig = fake_verify, dc.vision_verify_with

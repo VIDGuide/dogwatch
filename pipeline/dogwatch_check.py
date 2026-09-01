@@ -79,6 +79,8 @@ DEFAULT_VISION_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_VISION_MODEL = "qwen/qwen3.7-flash"
 DEFAULT_FALLBACK_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 DEFAULT_FALLBACK_MODEL = "gemini-3-flash-preview"
+DEFAULT_FALLBACK2_URL = "https://api.deepseek.com/chat/completions"
+DEFAULT_FALLBACK2_MODEL = "deepseek-v4-flash-vision-exp"
 
 # Telegram's hard caption limit is 1024 chars; keep well clear of it and leave
 # room for our own formatting around the model's sentence.
@@ -144,6 +146,9 @@ class Config:
         self.fallback_url = env.get("DOGWATCH_VISION_FALLBACK_API_URL", DEFAULT_FALLBACK_URL)
         self.fallback_model = env.get("DOGWATCH_VISION_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
         self.fallback_key = env.get("DOGWATCH_VISION_FALLBACK_API_KEY", "")
+        self.fallback2_url = env.get("DOGWATCH_VISION_FALLBACK2_API_URL", DEFAULT_FALLBACK2_URL)
+        self.fallback2_model = env.get("DOGWATCH_VISION_FALLBACK2_MODEL", DEFAULT_FALLBACK2_MODEL)
+        self.fallback2_key = env.get("DOGWATCH_VISION_FALLBACK2_API_KEY", "")
 
         self.alarm_script = env.get("DOGWATCH_ALARM_SCRIPT", "/app/dog-alarm.sh")
         self.stats_script = env.get("DW_STATS_SCRIPT", "/app/stats.py")
@@ -498,7 +503,12 @@ def resolve_provider_key(api_url, secrets):
     providers = secrets.get("models", {}).get("providers", {})
     if not isinstance(providers, dict):
         return ""
-    name = "openrouter" if "openrouter.ai" in api_url else "google"
+    if "openrouter.ai" in api_url:
+        name = "openrouter"
+    elif "deepseek.com" in api_url:
+        name = "deepseek"
+    else:
+        name = "google"
     entry = providers.get(name)
     if isinstance(entry, dict):
         return str(entry.get("apiKey", "") or "")
@@ -695,39 +705,52 @@ def vision_verify_with(image_path, api_url, model, api_key, provider_label,
     print(f"  vision_verify[{provider_label}] OK: dog={dog} digging={digging} "
           f"desc={description!r}", file=sys.stderr)
     if bump:
-        bump("vision_primary_ok" if provider_label == "primary"
-             else "vision_fallback_ok")
+        stat_key = {"primary": "vision_primary_ok",
+                    "fallback": "vision_fallback_ok",
+                    "fallback2": "vision_fallback2_ok"}.get(provider_label,
+                                                            "vision_fallback_ok")
+        bump(stat_key)
     return {"dog": dog, "digging": digging, "description": description}
 
 
 def make_vision_verifier(cfg, bump=None):
-    """Return ``verify(image_path)`` trying primary then fallback provider."""
+    """Return ``verify(image_path)`` trying primary, then fallback, then fallback2.
+
+    A tier is skipped when it has no key, or when it would duplicate an
+    already-tried endpoint+key (an account-level 429 or auth failure would
+    reject the retry identically — a wasted call, not a fallback).
+    """
+    tiers = [
+        ("primary", cfg.vision_url, cfg.vision_model, cfg.vision_key),
+        ("fallback", cfg.fallback_url, cfg.fallback_model, cfg.fallback_key),
+        ("fallback2", cfg.fallback2_url, cfg.fallback2_model, cfg.fallback2_key),
+    ]
+
     def verify(image_path):
-        result = vision_verify_with(image_path, cfg.vision_url, cfg.vision_model,
-                                    cfg.vision_key, "primary",
-                                    timeout=cfg.vision_timeout, bump=bump)
-        if result is not None:
-            return result
-        if not cfg.fallback_key:
-            print("  vision_verify: primary failed and no fallback key configured",
-                  file=sys.stderr)
-            return None
-        if (cfg.fallback_key == cfg.vision_key
-                and cfg.fallback_url == cfg.vision_url):
-            # Same key AND same endpoint: an account-level 429 or an auth
-            # failure will reject the retry identically, so this is a wasted
-            # call rather than a fallback. Worth surfacing, because the default
-            # config resolves both providers to the same OpenRouter key.
-            print("  vision_verify: fallback uses the same endpoint+key as the "
-                  "primary — skipping (configure DOGWATCH_VISION_FALLBACK_API_KEY "
-                  "with a different provider for a real fallback)",
-                  file=sys.stderr)
-            return None
-        print(f"  vision_verify: primary failed \u2192 trying fallback "
-              f"({cfg.fallback_model} @ {cfg.fallback_url})", file=sys.stderr)
-        return vision_verify_with(image_path, cfg.fallback_url, cfg.fallback_model,
-                                  cfg.fallback_key, "fallback",
-                                  timeout=cfg.vision_timeout, bump=bump)
+        tried = []  # (label, url, key) already attempted
+        for label, url, model, key in tiers:
+            if not key:
+                if label != "primary":
+                    print(f"  vision_verify: {label} has no key configured - "
+                          "skipping", file=sys.stderr)
+                continue
+            if any(u == url and k == key for (_, u, k) in tried):
+                print(f"  vision_verify: {label} uses the same endpoint+key as "
+                      f"an earlier tier - skipping (configure "
+                      f"DOGWATCH_VISION_{label.upper()}_API_KEY with a "
+                      "different provider for a real fallback)",
+                      file=sys.stderr)
+                continue
+            tried.append((label, url, key))
+            if label != "primary":
+                print(f"  vision_verify: primary failed -> trying {label} "
+                      f"({model} @ {url})", file=sys.stderr)
+            result = vision_verify_with(image_path, url, model, key, label,
+                                        timeout=cfg.vision_timeout, bump=bump)
+            if result is not None:
+                return result
+        return None
+
     return verify
 
 
@@ -1037,6 +1060,8 @@ def main(argv=None, env=None):
         cfg.vision_key = resolve_provider_key(cfg.vision_url, secrets)
     if not cfg.fallback_key:
         cfg.fallback_key = resolve_provider_key(cfg.fallback_url, secrets)
+    if not cfg.fallback2_key:
+        cfg.fallback2_key = resolve_provider_key(cfg.fallback2_url, secrets)
 
     if not cfg.vision_key:
         print("ERROR: no vision API key configured — set DOGWATCH_VISION_API_KEY "

@@ -69,14 +69,18 @@ services:
       # MQTT_TLS_CA_CERT: "/app/mqtt-ca.crt"
       # Vision verification. Primary: OpenRouter + Qwen (fast, cheap, strong
       # on small objects). Fallback: Google Gemini native OpenAI-compat
-      # endpoint with the secrets.json "google" key — a genuinely different
-      # provider, so an OpenRouter 429 doesn't kill the follow-up.
+      # endpoint (secrets.json "google" key). Fallback2: DeepSeek
+      # deepseek-v4-flash-vision-exp (secrets.json "deepseek" key) — three
+      # independent providers, so a 429 on any one doesn't kill the follow-up.
       # DOGWATCH_VISION_API_URL: ""
       # DOGWATCH_VISION_MODEL: ""
       # DOGWATCH_VISION_API_KEY: ""
       # DOGWATCH_VISION_FALLBACK_API_URL: ""
       # DOGWATCH_VISION_FALLBACK_MODEL: ""
       # DOGWATCH_VISION_FALLBACK_API_KEY: ""
+      # DOGWATCH_VISION_FALLBACK2_API_URL: ""
+      # DOGWATCH_VISION_FALLBACK2_MODEL: ""
+      # DOGWATCH_VISION_FALLBACK2_API_KEY: ""
       # Debug capture (notifier-side annotated snapshots)
       # DOGWATCH_DEBUG_CAPTURE: "true"
       # DOGWATCH_DEBUG_CAPTURE_DIR: "/app/debug_captures"
