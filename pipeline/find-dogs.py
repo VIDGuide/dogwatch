@@ -366,13 +366,24 @@ def _reject_redirect(r):
 
 
 def vision_verify_with(image_path, api_url, model, api_key, label):
+    """Run one vision provider. Returns ``(dog, activity, description)``.
+
+    On failure returns ``(None, '', '')`` — a 3-tuple, like the success path.
+    Every early return here previously yielded a 2-tuple ``(None, '')`` while
+    the success path returned 3 values, so ``vision_verify``'s unpack raised
+    ``ValueError: not enough values to unpack (expected 3, got 2)`` the instant
+    the primary provider failed. That is precisely the case the fallback exists
+    to cover, so the fallback was unreachable and a transient rate-limit turned
+    into a hard crash for that channel. ``dog is None`` is the sentinel the
+    caller tests, so the arity has to match.
+    """
     try:
         with open(image_path, 'rb') as f:
             b64 = base64.b64encode(f.read()).decode()
     except OSError as e:
         print(f'  vision[{label}] cannot read {image_path}: {e}',
               file=sys.stderr)
-        return None, ''
+        return None, '', ''
 
     payload = {
         'model': model,
@@ -407,7 +418,7 @@ def vision_verify_with(image_path, api_url, model, api_key, label):
         result = r.json()
     except Exception as e:
         print(f'  vision[{label}] API error: {e}', file=sys.stderr)
-        return None, ''
+        return None, '', ''
 
     combined = ''
     for choice in result.get('choices', []):
@@ -422,7 +433,7 @@ def vision_verify_with(image_path, api_url, model, api_key, label):
     if not combined or len(combined) < 5:
         print(f'  vision[{label}] truncated/empty response: {combined!r}',
               file=sys.stderr)
-        return None, ''
+        return None, '', ''
 
     dog = 'UNCERTAIN'
     activity = ''

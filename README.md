@@ -76,9 +76,22 @@ different model, that value is ignored — the detector now logs a warning sayin
 so instead of ignoring it silently. On startup it also prints each camera's
 effective `score_threshold`, so you can confirm what's actually in force.
 
+`mqtt_base_topic` goes further than per-camera: it must be **unique** per
+camera, and the detector refuses to start otherwise. Two cameras sharing a base
+topic register two distinct pairs of Home Assistant entities that both subscribe
+to the same state topic, so one camera's dog switches on the other camera's
+sensor and their retained snapshots overwrite each other — with nothing visible
+from the HA side to explain it. The same check rejects `MQTT_TOPIC` in the
+environment whenever more than one camera is configured, since it is a single
+global value that would override every camera's setting at once. (`MQTT_HOST`
+and `MQTT_PORT` are genuinely global — one broker — so they are unaffected.)
+
 | Key | Description |
 |-----|-------------|
 | `rtsp_url` | RTSP stream URL |
+| `mqtt_host` / `mqtt_port` | Broker address. Overridable fleet-wide via the `MQTT_HOST` / `MQTT_PORT` env vars |
+| `mqtt_base_topic` | Root topic for this camera's state, attribute, snapshot, geometry and availability topics. **Must be unique per camera** — see the note above. Overridable via `MQTT_TOPIC` only when a single camera is configured |
+| `clip_dir` | Where digging event clips are written. Default `clips`. Give each camera its own directory (`docker-compose.yml` mounts a separate `clips-rear-east` for exactly this reason): clip retention sweeps the whole directory by age, so cameras sharing one with different `clip_retention_days` will each apply their own cutoff to the other's files. Filenames are `dig_<camera>_<epoch>_<track>.jpg`, so a shared directory is at least collision-free |
 | `score_threshold` | Minimum detection confidence (0-1) required to fire an event. Default 0.4, and genuinely **per-camera** — raise it on just the camera that's producing false positives (fence posts, shadows, soil texture misidentified as a dog); see "Known limitations" for a documented example. Each event's `attributes` MQTT payload includes the actual detection `score`, so you can check how confident a specific false positive was before deciding how far to raise this. Values outside `(0, 1]` are rejected with a warning and fall back to the default — confidences are fractions, so `0.55`, not `55`. |
 | `snapshot_url` | (Optional) HTTP snapshot URL for clean stills |
 | `crop_roi` | (Optional) `[x1, y1, x2, y2]` normalised 0-1 — zoom into part of frame. Strongly recommended if the camera's full field of view is much wider than the actual fence/zone area: the detection model's input resolution (512×512 for EfficientDet-Lite3, 300×300 for older models) can struggle with small/distant dogs in a wide uncropped frame — see `samples/README.md` for measured evidence. Not currently set for the fence `camera` config, which is the most likely cause of missed detections on that camera specifically. |
@@ -90,7 +103,7 @@ effective `score_threshold`, so you can confirm what's actually in force.
 | `event_cooldown_seconds` | Min seconds between repeated events |
 | `off_delay_seconds` | HA `off_delay` for the binary sensors — auto-reverts to OFF this long after the last ON, even if our OFF message is lost (fixes sensors sticking triggered). Default 180 |
 | `min_consecutive` | Consecutive detections required before firing events |
-| `startup_timeout_seconds` | Max seconds to wait for the first camera frame before failing loudly (non-zero exit) instead of hanging forever. Default 60 |
+| `startup_timeout_seconds` | Max seconds to wait for this camera's first frame before giving up on it. Default 60. A camera that times out is **skipped**, not fatal: the other cameras start normally and the detector logs a `DEGRADED` line naming the ones that failed. The process only exits non-zero (letting the restart policy retry) when *no* camera at all could be started. This matches the running-state policy described under "Container health" — one dead camera should not restart a container that is successfully watching others. A skipped camera is not retried until the container restarts. |
 | `frame_stale_seconds` | If the newest decoded frame is older than this, the camera is treated as stale: detection is skipped and the HA entities go **unavailable** rather than sitting silently at OFF. Default 30. This is what makes a dead RTSP reader visible — a frozen frame is otherwise byte-identical to a static scene. Set 0 to disable. |
 | `mqtt_username` / `mqtt_password` | (Optional) MQTT broker credentials. Can also be set via the `MQTT_USERNAME` / `MQTT_PASSWORD` env vars |
 | `mqtt_tls` | (Optional) Enable TLS for the MQTT connection. Default `false` |
@@ -461,7 +474,10 @@ Unit tests cover the parts with real logic, as opposed to I/O glue:
 `tracker.py`, `behavior.py`, `snapshot_quality.py`, `motion_gate.py`,
 `static_suppressor.py`, `event_store.py`, `debug_capture.py`, `detector.py`'s
 tensor bookkeeping and bbox clamping, `frame_grabber.py`'s staleness/backoff
-signalling, `redact.py`, and `pipeline/dogwatch_check.py`'s watermark, read-offset
+signalling, `redact.py`, `dogwatch.py`'s per-camera startup isolation, topic
+collision guards and credential-safe error logging, `camera_pipeline.py`'s
+`tick()` event bookkeeping, `pipeline/find-dogs.py`'s vision-provider fallback,
+and `pipeline/dogwatch_check.py`'s watermark, read-offset
 and dedupe logic. They run on plain Python — no Coral hardware or camera feed
 needed.
 
