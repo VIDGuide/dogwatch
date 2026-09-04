@@ -63,6 +63,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -152,6 +153,12 @@ class Config:
 
         self.alarm_script = env.get("DOGWATCH_ALARM_SCRIPT", "/app/dog-alarm.sh")
         self.stats_script = env.get("DW_STATS_SCRIPT", "/app/stats.py")
+
+        # Jarvis announce hook (optional): env overrides for the fire-and-
+        # forget digging webhook; otherwise read from the notify config's
+        # "jarvis_hook" section (url + token). Both empty = feature off.
+        self.jarvis_hook_url = env.get("DOGWATCH_JARVIS_HOOK_URL", "")
+        self.jarvis_hook_token = env.get("DOGWATCH_JARVIS_HOOK_TOKEN", "")
 
         self.dedupe_window = _env_float(env, "DOGWATCH_DEDUPE_WINDOW", 90.0)
         # Replaces the old 7-minute wall-clock CUTOFF. The watermark is what
@@ -962,6 +969,107 @@ def report_verdict(tg, p, result, cfg, bump, run_alarm):
                 f"{event_label} at {p['time']}.{suffix} Check the snapshot manually.")
 
 
+# ---------------------------------------------------------------------------
+# Jarvis announce hook (optional)
+# ---------------------------------------------------------------------------
+#
+# Vision-confirmed digging events are POSTed as plain event FACTS to the
+# OpenClaw hooks rail (agentId=jarvis). The jarvis brain phrases the spoken
+# line and speaks it over the office speakers; DogWatch never sends
+# pre-written speech, only facts. ``deliver`` is always false — the spoken
+# announce IS the delivery, the turn result must not echo to any chat.
+#
+# Config: a ``jarvis_hook`` section in the notify config (url + token) or
+# DOGWATCH_JARVIS_HOOK_URL / DOGWATCH_JARVIS_HOOK_TOKEN env vars.
+# Missing url or token (or enabled:false) = feature off, zero overhead.
+
+JARVIS_HOOK_TIMEOUT = 5.0
+
+
+def _load_jarvis_hook_cfg(cfg):
+    """Resolve the jarvis hook ``{url, token}`` for this run.
+
+    Env overrides win; otherwise read the notify config's ``jarvis_hook``
+    section. Returns None when the feature is off.
+    """
+    notify = {}
+    try:
+        if cfg.notify_config and os.path.exists(cfg.notify_config):
+            with open(cfg.notify_config) as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                notify = loaded.get("jarvis_hook") or {}
+    except Exception as exc:
+        print(f"  WARN: cannot read jarvis_hook from {cfg.notify_config}: {exc}",
+              file=sys.stderr)
+    if not isinstance(notify, dict) or notify.get("enabled") is False:
+        return None
+    url = str(cfg.jarvis_hook_url or notify.get("url") or "").strip()
+    token = str(cfg.jarvis_hook_token or notify.get("token") or "").strip()
+    if not url or not token:
+        return None
+    return {"url": url, "token": token}
+
+
+def _jarvis_digging_facts(p, event_label):
+    """Plain-sentence event facts for the jarvis rail.
+
+    No commands, no urgency claims, no exclamation marks — the jarvis brain
+    writes the spoken line and decides priority.
+    """
+    camera = str(p.get("camera") or "camera")
+    cam_label = "main camera" if camera == "camera" else f"{camera} camera"
+    started = str(p.get("time") or "")[:5] or "unknown time"
+    score = p.get("score") or 0.0
+    facts = [f"digging detected - {cam_label}", f"started {started}"]
+    if score and score > 0:
+        facts.append(f"detector confidence {score:.2f}")
+    return "DogWatch event: " + ", ".join(facts) + "."
+
+
+def _jarvis_announce(cfg, p, event_label):
+    """Fire-and-forget POST of digging facts to the OpenClaw hooks rail.
+
+    Runs in a daemon thread with a short timeout so it can never delay the
+    siren or break the Telegram/snapshot path; failures are logged to the
+    check log only.
+    """
+    hook = _load_jarvis_hook_cfg(cfg)
+    if not hook:
+        return
+
+    def post():
+        payload = {
+            "agentId": "jarvis",
+            "name": "dogwatch-digging",
+            "message": _jarvis_digging_facts(p, event_label),
+            "wakeMode": "now",
+            "sessionMode": "isolated",
+            "deliver": False,
+        }
+        req = urllib.request.Request(
+            hook["url"],
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {hook['token']}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=JARVIS_HOOK_TIMEOUT) as resp:
+                body = resp.read(200).decode("utf-8", "replace").strip()
+            print(f"  jarvis announce hook: HTTP {resp.status} {body}",
+                  file=sys.stderr)
+        except Exception as exc:
+            print(f"  jarvis announce hook error: {exc}", file=sys.stderr)
+
+    try:
+        threading.Thread(target=post, daemon=True).start()
+    except Exception as exc:
+        print(f"  jarvis announce hook error: {exc}", file=sys.stderr)
+
+
 def make_alarm_runner(cfg, tg, bump, verify, cameras):
     """Return ``run_alarm(pending_entry, event_label)``.
 
@@ -969,6 +1077,11 @@ def make_alarm_runner(cfg, tg, bump, verify, cameras):
     the camera to see whether the dog was actually distracted.
     """
     def run_alarm(p, event_label):
+        # Jarvis spoken announce (optional): fired for every vision-confirmed
+        # digging event, independent of the siren's own window/replay guards
+        # (the announce quiet hours are enforced on the jarvis side).
+        _jarvis_announce(cfg, p, event_label)
+
         if not cfg.alarm_script or not os.path.exists(cfg.alarm_script):
             return
         reason = f"vision confirmed digging — {event_label} at {p['time']}"

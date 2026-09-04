@@ -6,7 +6,7 @@
       "detect_w": 640,
       "detect_h": 480
     },
-    "_comment_camera": "detect_w/detect_h/crop_roi here MUST match this camera's crop_roi and post-crop detection resolution in the container's own config.json, because the notifier scales bounding boxes with them. If config.json's crop_roi or stream resolution changes, update this entry too. The detector also publishes its actual geometry to the retained MQTT topic <base>/geometry (detect_w, detect_h, crop_roi) — check that topic to confirm the real values. Note: keys starting with '_' in this 'cameras' object are treated as comments and ignored.",
+    "_comment_camera": "detect_w/detect_h/crop_roi here MUST match this camera's crop_roi and post-crop detection resolution in the container's own config.json, because the notifier scales bounding boxes with them. If config.json's crop_roi or stream resolution changes, update this entry too. The detector also publishes its actual geometry to the retained MQTT topic <base>/geometry (detect_w, detect_h, crop_roi) \u2014 check that topic to confirm the real values. Note: keys starting with '_' in this 'cameras' object are treated as comments and ignored.",
     "rear-east": {
       "snapshot_url": "http://user:pass@nvr-ip/ISAPI/Streaming/channels/1201/picture",
       "snapshot_rtsp_fallback": "rtsp://user:pass@nvr-ip:554/Streaming/Channels/1201",
@@ -33,5 +33,11 @@
     "min_interval_sec": 60,
     "state_file": "/app/workspace/dog-alarm.state",
     "notify_chat": true
+  },
+  "jarvis_hook": {
+    "_comment_jarvis_hook": "OPTIONAL: POST vision-confirmed digging FACTS to the OpenClaw hooks rail (agentId=jarvis) so jarvis phrases + speaks an office announce. deliver is always false \u2014 the spoken announce IS the delivery. url must be reachable from this container (host forwarder on the docker bridge, see pipeline/jarvis-hook-fwd.sh); token = hooks.token from ~/.openclaw/openclaw.json. Missing/empty = feature off.",
+    "enabled": false,
+    "url": "",
+    "token": ""
   }
 }
