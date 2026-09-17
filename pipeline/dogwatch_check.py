@@ -81,7 +81,10 @@ DEFAULT_VISION_MODEL = "qwen/qwen3.7-flash"
 DEFAULT_FALLBACK_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 DEFAULT_FALLBACK_MODEL = "gemini-3-flash-preview"
 DEFAULT_FALLBACK2_URL = "https://api.deepseek.com/chat/completions"
-DEFAULT_FALLBACK2_MODEL = "deepseek-v4-flash-vision-exp"
+# DeepSeek's vision model. Launched 2026-08-21 as deepseek-v4-flash-vision-exp;
+# that name is retired and only still resolves for compatibility, so use the
+# live name or we inherit a silent rename the day the alias is dropped.
+DEFAULT_FALLBACK2_MODEL = "deepseek-flash"
 
 # Telegram's hard caption limit is 1024 chars; keep well clear of it and leave
 # room for our own formatting around the model's sentence.

@@ -396,7 +396,7 @@ environment or a wrapper script):
 | `DOGWATCH_VISION_FALLBACK_MODEL` | `gemini-3-flash-preview` | Fallback model name |
 | `DOGWATCH_VISION_FALLBACK_API_KEY` | (falls back to `secrets.json`) | Fallback API key |
 | `DOGWATCH_VISION_FALLBACK2_API_URL` | DeepSeek chat completions endpoint | Second fallback endpoint (tried after the first fallback) |
-| `DOGWATCH_VISION_FALLBACK2_MODEL` | `deepseek-v4-flash-vision-exp` | Second fallback model name |
+| `DOGWATCH_VISION_FALLBACK2_MODEL` | `deepseek-flash` | Second fallback model name |
 | `DOGWATCH_VISION_FALLBACK2_API_KEY` | (falls back to `secrets.json`) | Second fallback API key |
 
 The primary is OpenRouter + Qwen (fast, cheap, strong on small objects in wide
