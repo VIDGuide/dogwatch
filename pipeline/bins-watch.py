@@ -79,10 +79,17 @@ DEFAULTS = {
     "vision_url": ("https://generativelanguage.googleapis.com/v1beta/"
                    "openai/chat/completions"),
     "vision_model": "gemini-2.5-flash",
-    # Fallback used when the primary errors or rate-limits (the project already
-    # carries an OpenRouter key for exactly this reason).
-    "fallback_url": "https://openrouter.ai/api/v1/chat/completions",
-    "fallback_model": "qwen/qwen3.7-flash",
+    # Tried in order when the tier above fails or rate-limits. DeepSeek went
+    # multimodal on 2026-08-21 (deepseek-v4-flash-vision-exp; now just
+    # "deepseek-flash" — the old name still resolves). Cheap per image.
+    "vision_fallbacks": [
+        {"provider": "deepseek",
+         "url": "https://api.deepseek.com/chat/completions",
+         "model": "deepseek-flash"},
+        {"provider": "openrouter",
+         "url": "https://openrouter.ai/api/v1/chat/completions",
+         "model": "qwen/qwen3.7-flash"},
+    ],
     "vision_samples": 3,   # majority vote; one flaky reply must not move state
     "sample_gap": 4,       # seconds between samples (stay under free-tier RPM)
 }
@@ -278,32 +285,42 @@ def ask_count(image, cfg, key, url=None, model=None):
             "red": int(parsed.get("red", 0))}
 
 
+def vision_tiers(cfg, key):
+    """Ordered provider tiers: primary first, then every configured fallback
+    that actually has a key. A tier without a key is skipped, not attempted."""
+    tiers = [(cfg["vision_url"], cfg["vision_model"], key)]
+    for fb in cfg.get("vision_fallbacks", []) or []:
+        fb_key = provider_key(fb.get("provider", ""))
+        if fb_key:
+            tiers.append((fb["url"], fb["model"], fb_key))
+    return tiers
+
+
 def pad_composition(image, cfg, key, log):
-    """Majority vote over several samples — a single flaky reply, or a
-    transient rate-limit on one provider, must not move the state machine.
-    Primary provider first; the fallback is tried only if a sample fails."""
-    fb_key = provider_key("openrouter")
-    samples, votes = [], {}
+    """Majority vote over several samples. Every sample walks the provider
+    tiers in order, so a rate-limit on one provider neither loses the sample
+    nor moves the state machine."""
+    tiers = vision_tiers(cfg, key)
     gap = float(cfg.get("sample_gap", 4))
+    samples, votes = [], {}
     for i in range(max(1, int(cfg["vision_samples"]))):
         if i:
             time.sleep(gap)          # pace calls to stay under free-tier RPM
         counts = None
-        for attempt in range(2):
-            try:
-                counts = ask_count(image, cfg, key)
+        for tier_i, (url, model, tier_key) in enumerate(tiers):
+            for attempt in range(2):
+                try:
+                    counts = ask_count(image, cfg, tier_key, url, model)
+                    break
+                except Exception as exc:
+                    log(f"  sample {i + 1} tier {tier_i + 1} ({model}) "
+                        f"attempt {attempt + 1} failed: {exc}")
+                    if attempt == 0:
+                        time.sleep(5)
+            if counts is not None:
+                if tier_i:
+                    log(f"  sample {i + 1} recovered on {model}")
                 break
-            except Exception as exc:
-                log(f"  vision sample {i + 1} attempt {attempt + 1} failed: {exc}")
-                if attempt == 0:
-                    time.sleep(6)
-        if counts is None and fb_key:
-            try:
-                counts = ask_count(image, cfg, fb_key, cfg["fallback_url"],
-                                   cfg["fallback_model"])
-                log(f"  vision sample {i + 1} recovered on fallback provider")
-            except Exception as exc:
-                log(f"  vision sample {i + 1} fallback failed: {exc}")
         if counts is None:
             continue
         samples.append(counts)
