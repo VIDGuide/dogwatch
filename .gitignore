@@ -40,3 +40,6 @@ dogwatch-notify.config.json
 
 # Vision verify throttle state (runtime, regenerated)
 .vision_verify_state.json
+
+# Bin put-out watcher state (runtime)
+bins-watch.state
