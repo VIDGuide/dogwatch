@@ -76,15 +76,20 @@ from dw_redact import redact
 # Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_VISION_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_VISION_MODEL = "qwen/qwen3.7-flash"
+# Provider order: DeepSeek -> Google Gemini -> OpenRouter.
+# DeepSeek is primary because its vision model (multimodal since 2026-08-21)
+# proved it can carry a full production run — it did exactly that on
+# 2026-09-18, when Gemini's free tier 429'd on every sample and DeepSeek
+# answered all of them correctly — and it is the cheapest per image of the three.
+DEFAULT_VISION_URL = "https://api.deepseek.com/chat/completions"
+# Live model name. Launched as deepseek-v4-flash-vision-exp; that name is
+# retired and only still resolves for compatibility, so pin the live name
+# rather than inherit a silent rename when the alias is finally dropped.
+DEFAULT_VISION_MODEL = "deepseek-flash"
 DEFAULT_FALLBACK_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 DEFAULT_FALLBACK_MODEL = "gemini-3-flash-preview"
-DEFAULT_FALLBACK2_URL = "https://api.deepseek.com/chat/completions"
-# DeepSeek's vision model. Launched 2026-08-21 as deepseek-v4-flash-vision-exp;
-# that name is retired and only still resolves for compatibility, so use the
-# live name or we inherit a silent rename the day the alias is dropped.
-DEFAULT_FALLBACK2_MODEL = "deepseek-flash"
+DEFAULT_FALLBACK2_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_FALLBACK2_MODEL = "qwen/qwen3.7-flash"
 
 # Telegram's hard caption limit is 1024 chars; keep well clear of it and leave
 # room for our own formatting around the model's sentence.

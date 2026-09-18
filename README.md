@@ -389,26 +389,30 @@ environment or a wrapper script):
 
 | Env var | Default | Description |
 |---------|---------|--------------|
-| `DOGWATCH_VISION_API_URL` | OpenRouter chat completions endpoint | Primary chat completions endpoint URL |
-| `DOGWATCH_VISION_MODEL` | `qwen/qwen3.7-flash` | Primary model name to request |
+| `DOGWATCH_VISION_API_URL` | DeepSeek chat completions endpoint | Primary chat completions endpoint URL |
+| `DOGWATCH_VISION_MODEL` | `deepseek-flash` | Primary model name to request |
 | `DOGWATCH_VISION_API_KEY` | (falls back to `secrets.json`) | API key, sent as a `Bearer` token |
 | `DOGWATCH_VISION_FALLBACK_API_URL` | Google Gemini OpenAI-compat endpoint | Fallback endpoint, tried when the primary fails |
 | `DOGWATCH_VISION_FALLBACK_MODEL` | `gemini-3-flash-preview` | Fallback model name |
 | `DOGWATCH_VISION_FALLBACK_API_KEY` | (falls back to `secrets.json`) | Fallback API key |
-| `DOGWATCH_VISION_FALLBACK2_API_URL` | DeepSeek chat completions endpoint | Second fallback endpoint (tried after the first fallback) |
-| `DOGWATCH_VISION_FALLBACK2_MODEL` | `deepseek-flash` | Second fallback model name |
+| `DOGWATCH_VISION_FALLBACK2_API_URL` | OpenRouter chat completions endpoint | Second fallback endpoint (tried after the first fallback) |
+| `DOGWATCH_VISION_FALLBACK2_MODEL` | `qwen/qwen3.7-flash` | Second fallback model name |
 | `DOGWATCH_VISION_FALLBACK2_API_KEY` | (falls back to `secrets.json`) | Second fallback API key |
 
-The primary is OpenRouter + Qwen (fast, cheap, strong on small objects in wide
-frames); **Gemini is the fallback, not the default** — it moved when the free
-tier started 429ing mid-scan. When a key is unset it is resolved from
+The primary is DeepSeek's vision model (multimodal since 2026-08-21, and the
+cheapest per image of the three). It earned the slot: when Gemini's free tier
+429'd on every sample through a whole production run, DeepSeek answered them
+all and the result was still correct. **Gemini is the first fallback and
+OpenRouter + Qwen the second** — Gemini moved off primary when its free tier
+started 429ing mid-scan. When a key is unset it is resolved from
 `~/.openclaw/secrets.json`, picking the provider that matches the endpoint
-being called (`models.providers.openrouter.apiKey` for `openrouter.ai`,
+being called (`models.providers.deepseek.apiKey` for `deepseek.com`,
+`models.providers.openrouter.apiKey` for `openrouter.ai`,
 `models.providers.google.apiKey` otherwise), so the key always matches the API.
 
-**The fallbacks are genuinely different providers.** The defaults try
-OpenRouter + Qwen first, then Google's native OpenAI-compatible endpoint
-(Gemini), then DeepSeek's vision model — three independent providers with
+**The fallbacks are genuinely different providers.** The defaults try DeepSeek
+first, then Google's native OpenAI-compatible endpoint (Gemini), then
+OpenRouter + Qwen — three independent providers with
 separate quotas, so an account-level 429 (or outage) on any one of them is
 caught by the next. If you point the fallback at
 the *same* endpoint and key as the primary, the check script detects that

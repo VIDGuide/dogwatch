@@ -76,16 +76,20 @@ DEFAULTS = {
     "put_out_start": "18:00",
     "nag_start": "20:00",
     "nag_stop": "23:00",   # no overnight spam; the nag window ends here
-    "vision_url": ("https://generativelanguage.googleapis.com/v1beta/"
-                   "openai/chat/completions"),
-    "vision_model": "gemini-2.5-flash",
-    # Tried in order when the tier above fails or rate-limits. DeepSeek went
-    # multimodal on 2026-08-21 (deepseek-v4-flash-vision-exp; now just
-    # "deepseek-flash" — the old name still resolves). Cheap per image.
+    # Vision provider order: DeepSeek -> Gemini -> OpenRouter. DeepSeek is
+    # primary because its vision model (multimodal since 2026-08-21) carried a
+    # whole production run on 2026-09-18 when Gemini 429'd on every sample, and
+    # it is the cheapest per image. Each tier's key is resolved from
+    # secrets.json (models.providers.<provider>.apiKey) to match its endpoint.
+    "vision_primary": {
+        "provider": "deepseek",
+        "url": "https://api.deepseek.com/chat/completions",
+        "model": "deepseek-flash",
+    },
     "vision_fallbacks": [
-        {"provider": "deepseek",
-         "url": "https://api.deepseek.com/chat/completions",
-         "model": "deepseek-flash"},
+        {"provider": "google",
+         "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+         "model": "gemini-2.5-flash"},
         {"provider": "openrouter",
          "url": "https://openrouter.ai/api/v1/chat/completions",
          "model": "qwen/qwen3.7-flash"},
@@ -137,13 +141,6 @@ def load_config(path):
     if str(bins.get("preset", "")).isdigit():
         bins["preset"] = int(bins["preset"])
     return bins
-
-
-def vision_key(bins):
-    key = os.environ.get("DOGWATCH_VISION_API_KEY", "")
-    if key:
-        return key
-    return provider_key("google")
 
 
 def provider_key(name):
@@ -246,16 +243,15 @@ def ask_count(image, cfg, key, url=None, model=None):
     image.save(buf, format="JPEG", quality=90)
     b64 = base64.b64encode(buf.getvalue()).decode()
     payload = {
-        "model": model or cfg["vision_model"],
+        "model": model,
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": PROMPT},
             {"type": "image_url",
              "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
         ]}],
-        "max_tokens": 2000,   # gemini-2.5-flash spends part of this on internal
+        "max_tokens": 2000,   # reasoning models spend part of this on internal
                                # thinking; 300 truncated the JSON intermittently
     }
-    url = url or cfg["vision_url"]
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  method="POST")
     req.add_header("Content-Type", "application/json")
@@ -285,32 +281,43 @@ def ask_count(image, cfg, key, url=None, model=None):
             "red": int(parsed.get("red", 0))}
 
 
-def vision_tiers(cfg, key):
-    """Ordered provider tiers: primary first, then every configured fallback
-    that actually has a key. A tier without a key is skipped, not attempted."""
-    tiers = [(cfg["vision_url"], cfg["vision_model"], key)]
-    for fb in cfg.get("vision_fallbacks", []) or []:
-        fb_key = provider_key(fb.get("provider", ""))
-        if fb_key:
-            tiers.append((fb["url"], fb["model"], fb_key))
+def vision_tiers(cfg):
+    """Ordered provider tiers: primary first, then each configured fallback.
+
+    Keys resolve per provider from secrets.json so the key always matches the
+    endpoint being called. A tier with no key is skipped, not attempted, and
+    DOGWATCH_VISION_API_KEY overrides the primary's key.
+    """
+    entries = [cfg.get("vision_primary", {})] + list(
+        cfg.get("vision_fallbacks", []) or [])
+    override = os.environ.get("DOGWATCH_VISION_API_KEY", "")
+    tiers = []
+    for i, entry in enumerate(entries):
+        if not entry:
+            continue
+        key = override if (i == 0 and override) else provider_key(
+            entry.get("provider", ""))
+        if key:
+            tiers.append((entry["url"], entry["model"], key))
     return tiers
 
 
-def pad_composition(image, cfg, key, log):
+def pad_composition(image, cfg, tiers, log):
     """Majority vote over several samples. Every sample walks the provider
     tiers in order, so a rate-limit on one provider neither loses the sample
     nor moves the state machine."""
-    tiers = vision_tiers(cfg, key)
     gap = float(cfg.get("sample_gap", 4))
     samples, votes = [], {}
     for i in range(max(1, int(cfg["vision_samples"]))):
         if i:
             time.sleep(gap)          # pace calls to stay under free-tier RPM
         counts = None
+        used = None
         for tier_i, (url, model, tier_key) in enumerate(tiers):
             for attempt in range(2):
                 try:
                     counts = ask_count(image, cfg, tier_key, url, model)
+                    used = model
                     break
                 except Exception as exc:
                     log(f"  sample {i + 1} tier {tier_i + 1} ({model}) "
@@ -323,6 +330,9 @@ def pad_composition(image, cfg, key, log):
                 break
         if counts is None:
             continue
+        # record which provider actually answered — otherwise an unattended run
+        # gives no evidence of which tier is carrying the work
+        log(f"  sample {i + 1}: {used} -> {counts}")
         samples.append(counts)
         votes[tuple(sorted(counts.items()))] = votes.get(tuple(sorted(counts.items())), 0) + 1
     if not samples:
@@ -425,7 +435,7 @@ def main():
     now = dt.datetime.now()
     label = week_label(cfg, now)
     day = now.date().isoformat()          # state key for today
-    api_key = vision_key(cfg)             # vision credential (distinct!)
+    tiers = vision_tiers(cfg)             # ordered vision providers
     state = load_state(args.state)
 
     if args.cancel or args.resolve:
@@ -455,8 +465,8 @@ def main():
                 return 0
 
     # ---- look at the pad --------------------------------------------------
-    if not api_key:
-        log("  no vision API key available (secrets.json providers.google)")
+    if not tiers:
+        log("  no vision provider key available (secrets.json models.providers)")
         return 3
     cam = Camera(cfg["cam_host"], cfg["cam_user"], cfg["cam_password"])
     try:
@@ -475,7 +485,7 @@ def main():
             pass
 
     image = crop_pad(jpeg, cfg["pad_roi"])
-    observed, samples = pad_composition(image, cfg, api_key, log)
+    observed, samples = pad_composition(image, cfg, tiers, log)
     log(f"  samples: {samples}")
     if observed is None:
         log("  no usable vision sample — leaving state unchanged")

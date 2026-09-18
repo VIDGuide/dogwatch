@@ -67,11 +67,11 @@ services:
       # MQTT_PASSWORD: ""
       # MQTT_TLS: "true"
       # MQTT_TLS_CA_CERT: "/app/mqtt-ca.crt"
-      # Vision verification. Primary: OpenRouter + Qwen (fast, cheap, strong
-      # on small objects). Fallback: Google Gemini native OpenAI-compat
-      # endpoint (secrets.json "google" key). Fallback2: DeepSeek
-      # deepseek-v4-flash-vision-exp (secrets.json "deepseek" key) — three
-      # independent providers, so a 429 on any one doesn't kill the follow-up.
+      # Vision verification. Primary: DeepSeek deepseek-flash (vision since
+      # 2026-08-21; secrets.json "deepseek" key). Fallback: Google Gemini
+      # native OpenAI-compat endpoint ("google" key). Fallback2: OpenRouter +
+      # Qwen ("openrouter" key) — three independent providers, so a 429 on any
+      # one doesn't kill the follow-up.
       # DOGWATCH_VISION_API_URL: ""
       # DOGWATCH_VISION_MODEL: ""
       # DOGWATCH_VISION_API_KEY: ""
