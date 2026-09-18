@@ -30,13 +30,21 @@ services:
     devices:
       - /dev/apex_0:/dev/apex_0
 
-    # NVIDIA GPU access for NVDEC video decode
+    # NVIDIA GPU access for NVDEC video decode.
+    #
+    # Pinned to the RTX A2000 by UUID, deliberately. `count: 1` let Docker
+    # hand the container whichever GPU it liked, and on 2026-09-18 it picked
+    # the Quadro P620, which cannot initialise NVDEC — every cudacodec
+    # decoder create returned CUDA_ERROR_NO_DEVICE and the detector
+    # crash-looped with "No camera pipelines could be started". Verified by
+    # hand: both streams decode on the A2000, neither decodes on the P620.
+    # Pin by UUID, not index, so a device renumber survives a reboot.
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: ["GPU-16a56637-1648-6b33-9d84-6a5a43ebe7f2"]
               capabilities: [gpu, video]
 
     environment:
