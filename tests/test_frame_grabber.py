@@ -77,7 +77,9 @@ def make(**kw):
 
 def run_loop_until(grabber, stores=1):
     """Run _loop_cpu, stopping after *stores* successful frame stores."""
-    grabber.min_interval = 0.0
+    # No intake throttle to neutralise: _loop_cpu drains the stream flat out by
+    # design, and FakeCapture returns instantly, so the loop terminates on the
+    # store counter alone.
     grabber.reconnect_delay = 0.0
     original = grabber._store
     seen = {"n": 0}

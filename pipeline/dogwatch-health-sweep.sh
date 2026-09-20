@@ -57,6 +57,18 @@ if [ -f /tmp/dogwatch-watchdog.log ]; then
   grep -qE 'FIX|ERR' /tmp/dogwatch-watchdog.log && PROBLEMS+=("watchdog: $(tail -1 /tmp/dogwatch-watchdog.log)")
 fi
 
+# 8. Decoder health — ffmpeg HEVC errors in the detector log over the last
+#    15 min. A grabber that keeps up with its stream emits ~zero of these.
+#    Sustained errors mean the reader is falling behind and the decoder is
+#    parsing partial access units (missing reference pictures), which degrades
+#    detection *silently*: frames still arrive, so staleness, the heartbeat,
+#    the watchdog and the container healthcheck all stay green. This is the
+#    failure mode that hid for days in Sep 2026. Healthy is ~0/15min; the rate
+#    when the intake was throttled to 6fps against a 25fps stream was ~2,250.
+#    Override with DOGWATCH_DECODE_ERR_MAX.
+dec_errs="$(docker logs dogwatch --since 15m 2>&1 | grep -cE 'Error constructing the frame RPS|Could not find ref with POC')"
+[ "${dec_errs:-0}" -lt "${DOGWATCH_DECODE_ERR_MAX:-200}" ] || PROBLEMS+=("decoder: ${dec_errs} HEVC errors in 15m (limit ${DOGWATCH_DECODE_ERR_MAX:-200}) — grabber not keeping up with the stream")
+
 if [ "${#PROBLEMS[@]}" -eq 0 ]; then
   echo "HEALTHY"
   exit 0

@@ -43,7 +43,10 @@ class FrameGrabber:
         self.url = url
         self.name = name
         self.reconnect_delay = reconnect_delay
-        self.min_interval = 1.0 / max(1.0, target_fps * 2)
+        # Retained for callers that pass the camera's configured target_fps.
+        # Intake is deliberately NOT throttled to it — see _loop_cpu for why a
+        # rate limit in the read loop corrupts the decode it is meant to serve.
+        self.target_fps = float(target_fps)
         self.lock = threading.Lock()
         self.frame = None
         self.frame_ts = None          # wall-clock time the frame was decoded
@@ -187,9 +190,25 @@ class FrameGrabber:
             print(f"[{self.name}] frame grabber thread exiting", flush=True)
 
     def _loop_cpu(self):
+        """Drain the stream continuously; keep only the newest frame.
+
+        There is deliberately **no rate limit** in this loop. Sleeping here
+        throttles the *intake*, not the consumer's sampling rate, and a live
+        RTSP stream does not slow down to match: the demuxer/socket buffer backs
+        up and the decoder ends up parsing partial access units. That surfaces
+        as HEVC reference-picture-set errors ("Error constructing the frame
+        RPS" / "Could not find ref with POC") and silently degrades detection
+        without tripping any liveness check — the reader still returns frames,
+        so frame_age, staleness and the watchdog all look perfectly healthy.
+
+        Measured on this hardware against a 2592x1944 HEVC @ 25fps stream, in
+        matched 45s windows: the old 1/(target_fps*2) == 6fps cap gave 253
+        frames and 99 RPS errors; no cap gave 1131 frames and 0 errors. Decode
+        runs ~7x realtime here, so draining costs well under one core. The
+        consumer still samples at its own pace via read()/read_with_ts().
+        """
         delay = self.reconnect_delay
         while self.running:
-            t0 = time.time()
             try:
                 ok, f = self.cap.read()
             except cv2.error as exc:
@@ -207,14 +226,16 @@ class FrameGrabber:
                 continue
             delay = self.reconnect_delay
             self._store(f)
-            dt = time.time() - t0
-            if dt < self.min_interval:
-                time.sleep(self.min_interval - dt)
 
     def _loop_gpu(self):
+        """NVDEC equivalent of _loop_cpu — likewise unthrottled.
+
+        A rate limit here would back the decoder up exactly the same way, and
+        NVDEC reads are cheap, so the same argument applies verbatim: drain the
+        stream, keep the newest frame, let the consumer sample.
+        """
         delay = self.reconnect_delay
         while self.running:
-            t0 = time.time()
             try:
                 ok, gpu_mat = self._reader.nextFrame()
                 if not ok:
@@ -240,9 +261,6 @@ class FrameGrabber:
 
             delay = self.reconnect_delay
             self._store(f)
-            dt = time.time() - t0
-            if dt < self.min_interval:
-                time.sleep(self.min_interval - dt)
 
     # --- consumer API ---
 
