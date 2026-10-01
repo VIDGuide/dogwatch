@@ -107,8 +107,13 @@ PROMPT = (
     "Count how many wheelie bins are actually in this storage pad right "
     "now, by lid colour. Do not count shadows, the fence, plants, hoses, "
     "or the car.\n"
+    "IMPORTANT: a car parked in front of the pad is common, especially at "
+    "night. If a car or any other large object hides part of the pad so "
+    "that you cannot be sure you have seen every bin, set \"blocked\" to "
+    "true and report only the bins you can actually see.\n"
     'Reply STRICT JSON only: {"count": <int>, "yellow": <int>, '
-    '"green": <int>, "red": <int>, "description": "<=15 words"}'
+    '"green": <int>, "red": <int>, "blocked": <true|false>, '
+    '"description": "<=15 words"}'
 )
 
 
@@ -276,9 +281,10 @@ def ask_count(image, cfg, key, url=None, model=None):
     if start < 0 or end <= start:
         raise RuntimeError(f"vision reply had no JSON object: {text[:120]!r}")
     parsed = json.loads(text[start:end + 1])
-    return {"yellow": int(parsed.get("yellow", 0)),
-            "green": int(parsed.get("green", 0)),
-            "red": int(parsed.get("red", 0))}
+    return ({"yellow": int(parsed.get("yellow", 0)),
+             "green": int(parsed.get("green", 0)),
+             "red": int(parsed.get("red", 0))},
+            bool(parsed.get("blocked", False)))
 
 
 def vision_tiers(cfg):
@@ -308,15 +314,17 @@ def pad_composition(image, cfg, tiers, log):
     nor moves the state machine."""
     gap = float(cfg.get("sample_gap", 4))
     samples, votes = [], {}
+    blocked_samples = 0
     for i in range(max(1, int(cfg["vision_samples"]))):
         if i:
             time.sleep(gap)          # pace calls to stay under free-tier RPM
         counts = None
+        blocked = False
         used = None
         for tier_i, (url, model, tier_key) in enumerate(tiers):
             for attempt in range(2):
                 try:
-                    counts = ask_count(image, cfg, tier_key, url, model)
+                    counts, blocked = ask_count(image, cfg, tier_key, url, model)
                     used = model
                     break
                 except Exception as exc:
@@ -332,10 +340,22 @@ def pad_composition(image, cfg, tiers, log):
             continue
         # record which provider actually answered — otherwise an unattended run
         # gives no evidence of which tier is carrying the work
-        log(f"  sample {i + 1}: {used} -> {counts}")
+        log(f"  sample {i + 1}: {used} -> {counts}"
+            + ("  [BLOCKED]" if blocked else ""))
+        if blocked:
+            # An occluded pad is not evidence about the pad. Counting the one
+            # bin that pokes out past a parked car reads as "the others went
+            # out" — which is how a correct Week A put-out got reported as
+            # WRONG on 2026-10-01. Drop the sample; if every sample is
+            # blocked we abstain instead of guessing.
+            blocked_samples += 1
+            continue
         samples.append(counts)
         votes[tuple(sorted(counts.items()))] = votes.get(tuple(sorted(counts.items())), 0) + 1
     if not samples:
+        if blocked_samples:
+            log(f"  pad view blocked (car/large object) in {blocked_samples} "
+                f"sample(s) — abstaining, state unchanged")
         return None, samples
     winner = max(votes.items(), key=lambda kv: kv[1])[0]
     return dict(winner), samples
